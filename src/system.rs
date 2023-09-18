@@ -1,4 +1,4 @@
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[inline]
 pub fn wait<S, V, M>(state: &S, value: V, mask: M) {
     use std::mem::size_of;
@@ -17,7 +17,7 @@ pub fn wait<S, V, M>(state: &S, value: V, mask: M) {
     };
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 #[inline]
 pub fn wake<S, M>(state: &S, mask: M) {
     unsafe {
