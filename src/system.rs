@@ -25,45 +25,10 @@ pub fn wake<S, M>(state: &S, mask: M) {
             libc::SYS_futex,
             state as *const _,
             libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-            2,
+            u32::MAX,
             null::<libc::timespec>(),
             null::<u32>(),
             mask, // TODO: Convert to u32.
-        )
-    };
-}
-
-#[cfg(target_os = "linux")]
-#[inline]
-pub fn wait_array(state: &AtomicU32, value: u32) {
-    use std::mem::size_of;
-    debug_assert_eq!(size_of::<S>(), size_of::<V>());
-    debug_assert_eq!(size_of::<S>(), size_of::<M>());
-    unsafe {
-        libc::syscall(
-            libc::SYS_futex,
-            state as *const _,
-            libc::FUTEX_WAIT_BITSET | libc::FUTEX_PRIVATE_FLAG,
-            value,
-            null::<libc::timespec>(),
-            null::<u32>(),
-            u32::MAX,
-        )
-    };
-}
-
-#[cfg(target_os = "linux")]
-#[inline]
-pub fn wake_array(state: &AtomicU32) {
-    unsafe {
-        libc::syscall(
-            libc::SYS_futex,
-            state as *const _,
-            libc::FUTEX_WAKE | libc::FUTEX_PRIVATE_FLAG,
-            u32::MAX,
-            null::<libc::timespec>(),
-            null::<u32>(),
-            u32::MAX,
         )
     };
 }

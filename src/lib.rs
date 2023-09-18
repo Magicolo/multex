@@ -3,11 +3,6 @@ mod lock;
 mod multex;
 mod system;
 
-// pub use key::{
-//     At, At1, At10, At11, At12, At13, At14, At15, At16, At2, At3, At4, At5, At6, At7, At8, At9,
-//     One1, One10, One11, One12, One13, One14, One15, One16, One2, One3, One4, One5, One6, One7,
-//     One8, One9,
-// };
 pub use key::{
     Index, Key, One1, One10, One11, One12, One13, One14, One15, One16, One2, One3, One4, One5,
     One6, One7, One8, One9,
@@ -21,20 +16,6 @@ pub use multex::{
 /*
     TODO:
     - Use references for 'mask: Self'
-    - Add a 'AtomicUsize' counter to '[L; N]' 'Lock' implementation such that it is used in 'wait/wake'.
-    - Implement `StaticAt<0>, StaticAt<1>, ...` for tuples where appropriate.
-
-    - Add a `At<I>(I) where &I: IntoIterator<Item = usize>`. The `Key` implementation would return an `impl Iterator<Item = ...>`.
-    - Nested locks:
-        - Given a `struct Boba { a: usize, b: Vec<String>, c: Fett }`, there should be a way to lock nested fields.
-            #[derive(Lock)]
-            struct Boba { a: usize, b: Vec<String>, c: Fett }
-            #[derive(Lock)]
-            struct Fett { a: isize }
-
-            let boba = Multex::new([Boba { ... }]);
-            let key = (Boba::b::at(1), Boba::c::get(Fett::a));
-            let (Some(boba_b), Some(fett_a)) = boba.lock_with(&key, false) else { return; };
 */
 
 #[test]
@@ -97,7 +78,7 @@ fn fett() {
     struct Boba(usize, String, Vec<usize>);
     let mut boba1 = Boba(0, "".into(), vec![1, 2]);
     let mut vector1 = boba1.2.iter_mut();
-    let multex1 = Multex8::new((
+    let multex1 = Multex64::new((
         &mut boba1.0,
         &mut boba1.1,
         vector1.next().unwrap(),

@@ -1,5 +1,6 @@
 use crate::{multex::Multex, system};
 use std::{
+    array::from_fn,
     cell::UnsafeCell,
     error::Error,
     fmt,
@@ -146,7 +147,7 @@ unsafe impl<L: Lock + Eq, const N: usize> Lock for [L; N] {
 
     #[inline]
     fn new() -> Self::State {
-        ([(); N].map(|_| L::new()), AtomicU32::new(0))
+        (from_fn(|_| L::new()), AtomicU32::new(0))
     }
 
     fn lock(state: &Self::State, mask: Self, partial: bool, wait: bool) -> Option<Self> {

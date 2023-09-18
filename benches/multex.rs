@@ -77,13 +77,13 @@ fn multex(criterion: &mut Criterion) {
             |bencher, &batch| {
                 let pool = ThreadPoolBuilder::new().build().unwrap();
                 let multex = Multex64::new([(); COUNT].map(|_| 0));
-                let batches = (0..batch)
+                let keys = (0..batch)
                     .map(|i| Key::new(OFFSETS.map(|offset| (offset + i) % COUNT)).unwrap())
                     .collect::<Box<[_]>>();
                 bencher.iter(|| {
                     pool.scope(|scope| {
                         let multex = &multex;
-                        for (i, key) in batches.iter().enumerate() {
+                        for (i, key) in keys.iter().enumerate() {
                             scope.spawn(move |_| {
                                 for _ in 0..ITERATIONS {
                                     let mut guard = multex.lock_with(key, false);

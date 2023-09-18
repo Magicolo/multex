@@ -17,10 +17,10 @@ fn main() {
     });
     for i in 0.. {
         println!("{i}");
-        for batch in batches.iter() {
+        for keys in batches.iter() {
             scope(|scope| {
                 let multex = &multex;
-                for (i, key) in batch.iter().enumerate() {
+                for (i, key) in keys.iter().enumerate() {
                     scope.spawn(move || {
                         let mut guard = multex.lock_with(key, false);
                         for guard in guard.iter_mut() {
