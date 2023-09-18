@@ -1,0 +1,19 @@
+[package]
+name = "multex"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+libc = "*"
+windows-sys = { version = "*", features = ["Win32_System_Threading", "Win32_Foundation"] }
+
+[dev-dependencies]
+parking_lot = "*"
+criterion = "*"
+rayon = "*"
+
+[[bench]]
+name = "multex"
+harness = false
