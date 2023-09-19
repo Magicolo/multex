@@ -1,24 +1,22 @@
-use crate::{multex::Multex, system};
+use crate::system;
 use std::{
-    array::from_fn,
-    cell::UnsafeCell,
     error::Error,
     fmt,
     sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering::*},
 };
 
-pub unsafe trait Lock: Copy {
+pub unsafe trait Lock: Sized {
     type State;
     const MAX: Self;
     const ZERO: Self;
     const BITS: usize;
+    const NEW: Self::State;
 
-    fn new() -> Self::State;
-    fn lock(state: &Self::State, mask: Self, partial: bool, wait: bool) -> Option<Self>;
-    fn unlock(state: &Self::State, mask: Self, wake: bool);
-    fn is_locked(state: &Self::State, mask: Self, partial: bool) -> bool;
-    fn add(mask: Self, index: usize) -> Result<Self, IndexError>;
-    fn has(mask: Self, index: usize) -> bool;
+    fn lock(&self, state: &Self::State, partial: bool, wait: bool) -> Option<Self>;
+    fn unlock(&self, state: &Self::State, wake: bool);
+    fn is_locked(&self, state: &Self::State, partial: bool) -> bool;
+    fn add(&mut self, index: usize) -> Result<(), IndexError>;
+    fn has(&self, index: usize) -> bool;
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -41,14 +39,11 @@ macro_rules! lock {
             const MAX: Self = Self::MAX;
             const ZERO: Self = 0;
             const BITS: usize = Self::BITS as usize;
+            #[allow(clippy::declare_interior_mutable_const)]
+            const NEW: Self::State = <$a>::new(0);
 
             #[inline]
-            fn new() -> Self::State {
-                <$a>::new(0)
-            }
-
-            #[inline]
-            fn lock(state: &Self::State, mask: Self, partial: bool, wait: bool) -> Option<Self> {
+            fn lock(&self, state: &Self::State, partial: bool, wait: bool) -> Option<Self> {
                 #[inline]
                 fn lock_once(state: &$a, mask: $v) -> Result<$v, $v> {
                     state.fetch_update(Acquire, Relaxed, |state| {
@@ -69,6 +64,7 @@ macro_rules! lock {
                     }
                 }
 
+                let mask = *self;
                 if mask == Self::ZERO {
                     Some(mask)
                 } else if partial {
@@ -81,7 +77,8 @@ macro_rules! lock {
             }
 
             #[inline]
-            fn unlock(state: &Self::State, mask: Self, wake: bool) {
+            fn unlock(&self, state: &Self::State, wake: bool) {
+                let mask = *self;
                 if mask == Self::ZERO {
                     return;
                 }
@@ -93,7 +90,8 @@ macro_rules! lock {
             }
 
             #[inline]
-            fn is_locked(state: &Self::State, mask: Self, partial: bool) -> bool {
+            fn is_locked(&self, state: &Self::State, partial: bool) -> bool {
+                let mask = *self;
                 if mask == Self::ZERO {
                     false
                 } else if partial {
@@ -104,30 +102,21 @@ macro_rules! lock {
             }
 
             #[inline]
-            fn add(mask: Self, index: usize) -> Result<Self, IndexError> {
+            fn add(&mut self, index: usize) -> Result<(), IndexError> {
                 let Some(bit) = (1 as $v).checked_shl(index as _) else { return Err(IndexError::OutOfBounds(index)) };
-                let next = mask | bit;
-                if mask == next {
+                let previous = *self;
+                *self |= bit;
+                if previous == *self {
                     Err(IndexError::Duplicate(index))
                 } else {
-                    Ok(next)
+                    Ok(())
                 }
             }
 
             #[inline]
-            fn has(mask: Self, index: usize) -> bool {
+            fn has(&self, index: usize) -> bool {
                 let Some(bit) = (1 as $v).checked_shl(index as _) else { return false; };
-                mask & bit == bit
-            }
-        }
-
-        impl<T> Multex<T, $v> {
-            #[inline]
-            pub const fn const_new(values: T) -> Self {
-                Self {
-                    state: <$a>::new(0),
-                    value: UnsafeCell::new(values),
-                }
+                self & bit == bit
             }
         }
     };
@@ -139,22 +128,14 @@ lock!(u32, AtomicU32);
 lock!(u64, AtomicU64);
 lock!(usize, AtomicUsize);
 
-unsafe impl<L: Lock + Eq, const N: usize> Lock for [L; N] {
+unsafe impl<L: Lock, const N: usize> Lock for [L; N] {
     type State = ([L::State; N], AtomicU32);
     const MAX: Self = [L::MAX; N];
     const ZERO: Self = [L::ZERO; N];
     const BITS: usize = L::BITS * N;
+    const NEW: Self::State = ([L::NEW; N], AtomicU32::new(0));
 
-    #[inline]
-    fn new() -> Self::State {
-        (from_fn(|_| L::new()), AtomicU32::new(0))
-    }
-
-    fn lock(state: &Self::State, mask: Self, partial: bool, wait: bool) -> Option<Self> {
-        if mask == Self::ZERO {
-            return Some(mask);
-        }
-
+    fn lock(&self, state: &Self::State, partial: bool, wait: bool) -> Option<Self> {
         loop {
             let mut masks = Self::ZERO;
             let mut done = true;
@@ -163,12 +144,12 @@ unsafe impl<L: Lock + Eq, const N: usize> Lock for [L; N] {
             } else {
                 u32::MAX
             };
-            for (index, pair) in state.0.iter().zip(mask).enumerate() {
-                match L::lock(pair.0, pair.1, partial, false) {
+            for (index, pair) in state.0.iter().zip(self).enumerate() {
+                match pair.1.lock(pair.0, partial, false) {
                     Some(mask) => masks[index] = mask,
                     None => {
                         // The `masks` ensures that only locks that were taken are unlocked.
-                        Self::unlock(state, masks, true);
+                        masks.unlock(state, true);
                         if wait {
                             system::wait(&state.1, value, u32::MAX);
                             done = false;
@@ -186,9 +167,9 @@ unsafe impl<L: Lock + Eq, const N: usize> Lock for [L; N] {
     }
 
     #[inline]
-    fn unlock(state: &Self::State, mask: Self, wake: bool) {
-        for (state, mask) in state.0.iter().zip(mask) {
-            L::unlock(state, mask, false);
+    fn unlock(&self, state: &Self::State, wake: bool) {
+        for (state, mask) in state.0.iter().zip(self) {
+            mask.unlock(state, false);
         }
         state.1.fetch_add(1, Release);
         if wake {
@@ -197,9 +178,9 @@ unsafe impl<L: Lock + Eq, const N: usize> Lock for [L; N] {
     }
 
     #[inline]
-    fn is_locked(state: &Self::State, mask: Self, partial: bool) -> bool {
-        for (state, mask) in state.0.iter().zip(mask) {
-            if L::is_locked(state, mask, partial) {
+    fn is_locked(&self, state: &Self::State, partial: bool) -> bool {
+        for (state, mask) in state.0.iter().zip(self) {
+            if mask.is_locked(state, partial) {
                 return true;
             }
         }
@@ -207,20 +188,17 @@ unsafe impl<L: Lock + Eq, const N: usize> Lock for [L; N] {
     }
 
     #[inline]
-    fn add(mut mask: Self, index: usize) -> Result<Self, IndexError> {
-        match mask.get_mut(index / L::BITS) {
-            Some(value) => {
-                *value = L::add(*value, index % L::BITS)?;
-                Ok(mask)
-            }
+    fn add(&mut self, index: usize) -> Result<(), IndexError> {
+        match self.get_mut(index / L::BITS) {
+            Some(mask) => mask.add(index % L::BITS),
             None => Err(IndexError::OutOfBounds(index)),
         }
     }
 
     #[inline]
-    fn has(mask: Self, index: usize) -> bool {
-        match mask.get(index / L::BITS) {
-            Some(value) => L::has(*value, index % L::BITS),
+    fn has(&self, index: usize) -> bool {
+        match self.get(index / L::BITS) {
+            Some(mask) => mask.has(index % L::BITS),
             None => false,
         }
     }
@@ -228,30 +206,22 @@ unsafe impl<L: Lock + Eq, const N: usize> Lock for [L; N] {
 
 macro_rules! tuples {
     ($n:tt, $($l:ident, $i:tt),+) => {
-        unsafe impl<$($l: Lock + Eq),+> Lock for ($($l,)+) {
+        unsafe impl<$($l: Lock),+> Lock for ($($l,)+) {
             type State = ($($l::State,)+ AtomicU32);
             const MAX: Self = ($($l::MAX,)+);
             const ZERO: Self = ($($l::ZERO,)+);
             const BITS: usize = $($l::BITS +)+ 0;
+            const NEW: Self::State = ($($l::NEW,)+ AtomicU32::new(0));
 
-            #[inline]
-            fn new() -> Self::State {
-                ($($l::new(),)+ AtomicU32::new(0))
-            }
-
-            fn lock(state: &Self::State, mask: Self, partial: bool, wait: bool) -> Option<Self> {
-                if $(mask.$i == Self::ZERO.$i &&)+ true {
-                    return Some(mask);
-                }
-
+            fn lock(&self, state: &Self::State, partial: bool, wait: bool) -> Option<Self> {
                 loop {
                     let mut masks = Self::ZERO;
                     let value = if wait { state.$n.load(Acquire) } else { u32::MAX };
-                    $(match $l::lock(&state.$i, mask.$i, partial, false) {
+                    $(match self.$i.lock(&state.$i, partial, false) {
                         Some(mask) => masks.$i = mask,
                         None => {
                             // The `masks` ensures that only locks that were taken are unlocked.
-                            Self::unlock(state, masks, true);
+                            masks.unlock(state, true);
                             if wait { system::wait(&state.1, value, u32::MAX); continue; }
                             else { break None; }
                         }
@@ -260,26 +230,26 @@ macro_rules! tuples {
                 }
             }
             #[inline]
-            fn unlock(state: &Self::State, mask: Self, wake: bool) {
-                $($l::unlock(&state.$i, mask.$i, false);)+
+            fn unlock(&self, state: &Self::State, wake: bool) {
+                $(self.$i.unlock(&state.$i, false);)+
                 state.$n.fetch_and(1, Release);
                 if wake {
                     system::wake(&state.$n, u32::MAX);
                 }
             }
             #[inline]
-            fn is_locked(state: &Self::State, mask: Self, partial: bool) -> bool {
-                $(if $l::is_locked(&state.$i, mask.$i, partial) { return true; })+
+            fn is_locked(&self, state: &Self::State, partial: bool) -> bool {
+                $(if self.$i.is_locked(&state.$i, partial) { return true; })+
                 false
             }
             #[inline]
-            fn add(mut mask: Self, mut index: usize) -> Result<Self, IndexError> {
-                $(if index < $l::BITS { mask.$i = $l::add(mask.$i, index)?; return Ok(mask); } else { index -= $l::BITS; })+
+            fn add(&mut self, mut index: usize) -> Result<(), IndexError> {
+                $(if index < $l::BITS { self.$i.add(index)?; return Ok(()); } else { index -= $l::BITS; })+
                 Err(IndexError::OutOfBounds(index))
             }
             #[inline]
-            fn has(mask: Self, mut _index: usize) -> bool {
-                $(if _index < $l::BITS { return $l::has(mask.$i, _index); } else { _index -= $l::BITS; })+
+            fn has(&self, mut _index: usize) -> bool {
+                $(if _index < $l::BITS { return self.$i.has(_index); } else { _index -= $l::BITS; })+
                 false
             }
         }

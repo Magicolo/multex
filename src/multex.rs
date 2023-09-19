@@ -35,8 +35,8 @@ impl<'a, T, L: Lock> Guard<'a, T, L> {
     }
 
     #[inline]
-    pub fn mask(&self) -> L {
-        self.1 .1
+    pub fn mask(&self) -> &L {
+        &self.1 .1
     }
 }
 
@@ -56,19 +56,26 @@ impl<T, L: Lock> DerefMut for Guard<'_, T, L> {
 
 impl<L: Lock> Drop for Inner<'_, L> {
     fn drop(&mut self) {
-        L::unlock(self.0, self.1, true);
+        self.1.unlock(self.0, true);
     }
 }
 
 impl<T, L: Lock> Multex<T, L> {
     #[inline]
-    pub fn new(values: T) -> Self {
+    pub const fn new(values: T) -> Self {
         Self {
-            state: L::new(),
+            state: L::NEW,
             value: UnsafeCell::new(values),
         }
     }
 
+    #[inline]
+    pub fn into_inner(self) -> T {
+        self.value.into_inner()
+    }
+}
+
+impl<T: ?Sized, L: Lock> Multex<T, L> {
     #[inline]
     pub const fn as_ptr(&self) -> *const T {
         self.value.get()
@@ -81,7 +88,7 @@ impl<T, L: Lock> Multex<T, L> {
 
     #[inline]
     pub fn lock(&self) -> Guard<'_, &mut T, L> {
-        match L::lock(&self.state, L::MAX, false, true) {
+        match L::MAX.lock(&self.state, false, true) {
             Some(mask) => unsafe { self.guard(mask) },
             None => unreachable!(),
         }
@@ -89,14 +96,14 @@ impl<T, L: Lock> Multex<T, L> {
 
     #[inline]
     pub fn try_lock(&self) -> Option<Guard<&mut T, L>> {
-        let mask = L::lock(&self.state, L::MAX, false, false)?;
+        let mask = L::MAX.lock(&self.state, false, false)?;
         Some(unsafe { self.guard(mask) })
     }
 
     #[inline]
     pub fn lock_with<A: At<T>>(&self, key: &Key<L, A>, partial: bool) -> Guard<'_, A::Item<'_>, L> {
-        match L::lock(&self.state, *key.mask(), partial, true) {
-            Some(mask) => unsafe { self.guard_with(mask, key) },
+        match key.mask().lock(&self.state, partial, true) {
+            Some(mask) => unsafe { self.guard_with(mask, key, partial) },
             None => unreachable!(),
         }
     }
@@ -107,38 +114,47 @@ impl<T, L: Lock> Multex<T, L> {
         key: &Key<L, A>,
         partial: bool,
     ) -> Option<Guard<'_, A::Item<'_>, L>> {
-        let mask = L::lock(&self.state, *key.mask(), partial, false)?;
-        Some(unsafe { self.guard_with(mask, key) })
+        let mask = key.mask().lock(&self.state, partial, false)?;
+        Some(unsafe { self.guard_with(mask, key, partial) })
     }
 
+    /// Forcefully unlocks all the bits. A normal usage of a [`Multex`] normally doesn't require to unlock manually
+    /// since the [`Guard`] already does it automatically. This method is mainly meant to be used when [`std::mem::forget(guard)`] is
+    /// used.
+    ///
+    /// # Safety
+    /// This method is marked as `unsafe` because it may unlock bits that are still locked by a [`Guard`]. A wrong usage of unlock will
+    /// allow multiple concurrent mutable references to exist, thus causing undefined behavior.
     #[inline]
     pub unsafe fn unlock(&self) {
-        L::unlock(&self.state, L::MAX, true);
+        L::MAX.unlock(&self.state, true);
     }
 
+    /// Forcefully unlocks the bits contained in the provided `mask`. A normal usage of a [`Multex`] normally doesn't require to unlock
+    /// manually since the [`Guard`] already does it automatically. This method is mainly meant to be used when
+    /// [`std::mem::forget(guard)`] is used.
+    ///
+    /// # Safety
+    /// This method is marked as `unsafe` because it may unlock bits that are still locked by a [`Guard`]. A wrong usage of unlock will
+    /// allow multiple concurrent mutable references to exist, thus causing undefined behavior.
     #[inline]
-    pub unsafe fn unlock_with<A: At<T>>(&self, mask: L) {
-        L::unlock(&self.state, mask, true);
+    pub unsafe fn unlock_with<A: At<T>>(&self, mask: &L) {
+        mask.unlock(&self.state, true);
     }
 
     #[inline]
     pub fn is_locked(&self, partial: bool) -> bool {
-        L::is_locked(&self.state, L::MAX, partial)
+        L::MAX.is_locked(&self.state, partial)
     }
 
     #[inline]
     pub fn is_locked_with<A: At<T>>(&self, key: &Key<L, A>, partial: bool) -> bool {
-        L::is_locked(&self.state, *key.mask(), partial)
+        key.mask().is_locked(&self.state, partial)
     }
 
     #[inline]
     pub fn get_mut<A: At<T>>(&mut self, key: &Key<L, A>) -> A::Item<'_> {
         unsafe { key.indices().at(self.value.get_mut(), |_| true) }
-    }
-
-    #[inline]
-    pub fn into_inner(self) -> T {
-        self.value.into_inner()
     }
 
     #[inline]
@@ -148,11 +164,16 @@ impl<T, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    unsafe fn guard_with<A: At<T>>(&self, mask: L, key: &Key<L, A>) -> Guard<A::Item<'_>, L> {
+    unsafe fn guard_with<A: At<T>>(
+        &self,
+        mask: L,
+        key: &Key<L, A>,
+        partial: bool,
+    ) -> Guard<A::Item<'_>, L> {
         let inner = Inner(&self.state, mask);
-        let item = key
-            .indices()
-            .at(self.value.get(), |index| L::has(mask, index));
+        let item = key.indices().at(self.value.get(), |index| {
+            !partial || L::has(&inner.1, index)
+        });
         Guard(item, inner)
     }
 }

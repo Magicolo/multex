@@ -26,9 +26,9 @@ pub unsafe trait At<T: ?Sized> {
 }
 
 impl<L: Lock, I: Fold<usize>> Key<L, I> {
-    #[inline]
     pub fn new(indices: I) -> Result<Self, IndexError> {
-        let mask = indices.fold(Ok(L::ZERO), |mask, index| L::add(mask?, index))?;
+        let mut mask = L::ZERO;
+        indices.fold(Ok(()), |result, index| result.and_then(|_| mask.add(index)))?;
         Ok(Self(mask, indices))
     }
 }
@@ -311,7 +311,31 @@ unsafe impl<T, A: At<T>> At<T> for &mut A {
 
 macro_rules! tuples {
     ($n:expr, $one:ident $(, $tn:ident, $ti:ident, $i:tt)+) => {
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
         pub enum $one<$($tn),+> { $($tn($tn)),+ }
+
+        impl<$($tn),+> $one<$($tn),+> {
+            #[inline]
+            pub fn unify<T>(self) -> T where $($tn: Into<T>),+ {
+                match self {
+                    $(Self::$tn(item) => item.into(),)+
+                }
+            }
+
+            #[inline]
+            pub const fn as_ref(&self) -> $one<$(&$tn,)+> {
+                match self {
+                    $(Self::$tn(item) => $one::$tn(item),)+
+                }
+            }
+
+            #[inline]
+            pub fn as_mut(&mut self) -> $one<$(&mut $tn,)+> {
+                match self {
+                    $(Self::$tn(item) => $one::$tn(item),)+
+                }
+            }
+        }
 
         unsafe impl<$($tn,)+> At<($($tn,)+)> for usize {
             type Item<'a> = Option<$one<$(&'a mut $tn),+>> where Self: 'a, ($($tn,)+): 'a;
