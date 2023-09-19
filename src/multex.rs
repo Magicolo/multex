@@ -103,7 +103,7 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     #[inline]
     pub fn lock_with<A: At<T>>(&self, key: &Key<L, A>, partial: bool) -> Guard<'_, A::Item<'_>, L> {
         match key.mask().lock(&self.state, partial, true) {
-            Some(mask) => unsafe { self.guard_with(mask, key, partial) },
+            Some(mask) => unsafe { self.guard_with(mask, key) },
             None => unreachable!(),
         }
     }
@@ -115,7 +115,7 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
         partial: bool,
     ) -> Option<Guard<'_, A::Item<'_>, L>> {
         let mask = key.mask().lock(&self.state, partial, false)?;
-        Some(unsafe { self.guard_with(mask, key, partial) })
+        Some(unsafe { self.guard_with(mask, key) })
     }
 
     /// Forcefully unlocks all the bits. A normal usage of a [`Multex`] normally doesn't require to unlock manually
@@ -164,16 +164,13 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    unsafe fn guard_with<A: At<T>>(
-        &self,
-        mask: L,
-        key: &Key<L, A>,
-        partial: bool,
-    ) -> Guard<A::Item<'_>, L> {
-        let inner = Inner(&self.state, mask);
+    unsafe fn guard_with<A: At<T>>(&self, mut mask: L, key: &Key<L, A>) -> Guard<A::Item<'_>, L> {
+        let mut inner = Inner(&self.state, L::ZERO);
         let item = key.indices().at(self.value.get(), |index| {
-            !partial || L::has(&inner.1, index)
+            mask.remove(index) && inner.1.add(index)
         });
+        // Unlock bits that were not used in the key.
+        mask.unlock(&self.state, true);
         Guard(item, inner)
     }
 }

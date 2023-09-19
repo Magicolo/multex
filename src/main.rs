@@ -12,7 +12,7 @@ fn main() {
     let multex = Multex64::new([(); COUNT].map(|_| 0));
     let batches = BATCHES.map(|batch| {
         (0..batch)
-            .map(|i| Key::new(OFFSETS.map(|offset| (offset + i) % COUNT)).unwrap())
+            .map(|i| Key::new(OFFSETS.map(|offset| (offset + i) % COUNT)))
             .collect::<Box<[_]>>()
     });
     for i in 0.. {

@@ -1,4 +1,4 @@
-use crate::lock::{IndexError, Lock};
+use crate::lock::Lock;
 use std::{alloc::Layout, array::from_fn, mem::transmute};
 
 pub struct Key<L, I>(L, I);
@@ -26,10 +26,10 @@ pub unsafe trait At<T: ?Sized> {
 }
 
 impl<L: Lock, I: Fold<usize>> Key<L, I> {
-    pub fn new(indices: I) -> Result<Self, IndexError> {
+    pub fn new(indices: I) -> Self {
         let mut mask = L::ZERO;
-        indices.fold(Ok(()), |result, index| result.and_then(|_| mask.add(index)))?;
-        Ok(Self(mask, indices))
+        indices.fold(true, |_, index| mask.add(index));
+        Self(mask, indices)
     }
 }
 
@@ -380,9 +380,9 @@ macro_rules! at {
 
             #[inline]
             unsafe fn at<'a, F: FnMut(usize) -> bool>(&self, items: *mut ($($ts,)+), mut filter: F) -> Self::Item<'a> where ($($ts,)+): 'a {
+                let mut _layout = Layout::new::<()>();
+                let offsets = ($({ let pair = _layout.extend(Layout::new::<$ts>()).unwrap(); _layout = pair.0; pair.1 },)+);
                 if filter($i) {
-                    let mut _layout = Layout::new::<()>();
-                    let offsets = ($({ let pair = _layout.extend(Layout::new::<$ts>()).unwrap(); _layout = pair.0; pair.1 },)+);
                     Some(unsafe { &mut *items.cast::<u8>().add(offsets.$i).cast::<$t>() })
                 } else {
                     None

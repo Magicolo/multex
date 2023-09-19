@@ -78,7 +78,7 @@ fn multex(criterion: &mut Criterion) {
                 let pool = ThreadPoolBuilder::new().build().unwrap();
                 let multex = Multex64::new([(); COUNT].map(|_| 0));
                 let keys = (0..batch)
-                    .map(|i| Key::new(OFFSETS.map(|offset| (offset + i) % COUNT)).unwrap())
+                    .map(|i| Key::new(OFFSETS.map(|offset| (offset + i) % COUNT)))
                     .collect::<Box<[_]>>();
                 bencher.iter(|| {
                     pool.scope(|scope| {
@@ -101,5 +101,5 @@ fn multex(criterion: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, standard_mutex, parking_lot_mutex, multex);
+criterion_group!(benches, multex, standard_mutex, parking_lot_mutex);
 criterion_main!(benches);

@@ -1,9 +1,5 @@
 use crate::system;
-use std::{
-    error::Error,
-    fmt,
-    sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering::*},
-};
+use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering::*};
 
 pub unsafe trait Lock: Sized {
     type State;
@@ -13,24 +9,11 @@ pub unsafe trait Lock: Sized {
     const NEW: Self::State;
 
     fn lock(&self, state: &Self::State, partial: bool, wait: bool) -> Option<Self>;
-    fn unlock(&self, state: &Self::State, wake: bool);
+    fn unlock(&self, state: &Self::State, wake: bool) -> bool;
     fn is_locked(&self, state: &Self::State, partial: bool) -> bool;
-    fn add(&mut self, index: usize) -> Result<(), IndexError>;
-    fn has(&self, index: usize) -> bool;
+    fn add(&mut self, index: usize) -> bool;
+    fn remove(&mut self, index: usize) -> bool;
 }
-
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
-pub enum IndexError {
-    OutOfBounds(usize),
-    Duplicate(usize),
-}
-
-impl fmt::Display for IndexError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        fmt::Debug::fmt(self, f)
-    }
-}
-impl Error for IndexError {}
 
 macro_rules! lock {
     ($v:ty, $a:ty) => {
@@ -77,16 +60,16 @@ macro_rules! lock {
             }
 
             #[inline]
-            fn unlock(&self, state: &Self::State, wake: bool) {
+            fn unlock(&self, state: &Self::State, wake: bool) -> bool {
                 let mask = *self;
                 if mask == Self::ZERO {
-                    return;
+                    return false;
                 }
-
-                state.fetch_and(!mask, Release);
-                if wake {
+                let change = state.fetch_and(!mask, Release) & mask != 0;
+                if change && wake {
                     system::wake(state, mask);
                 }
+                change
             }
 
             #[inline]
@@ -102,21 +85,23 @@ macro_rules! lock {
             }
 
             #[inline]
-            fn add(&mut self, index: usize) -> Result<(), IndexError> {
-                let Some(bit) = (1 as $v).checked_shl(index as _) else { return Err(IndexError::OutOfBounds(index)) };
+            fn add(&mut self, index: usize) -> bool {
+                let Some(bit) = (1 as $v).checked_shl(index as _) else {
+                    return false;
+                };
                 let previous = *self;
                 *self |= bit;
-                if previous == *self {
-                    Err(IndexError::Duplicate(index))
-                } else {
-                    Ok(())
-                }
+                previous != *self
             }
 
             #[inline]
-            fn has(&self, index: usize) -> bool {
-                let Some(bit) = (1 as $v).checked_shl(index as _) else { return false; };
-                self & bit == bit
+            fn remove(&mut self, index: usize) -> bool {
+                let Some(bit) = (1 as $v).checked_shl(index as _) else {
+                    return false;
+                };
+                let previous = *self;
+                *self &= !bit;
+                previous != *self
             }
         }
     };
@@ -167,14 +152,18 @@ unsafe impl<L: Lock, const N: usize> Lock for [L; N] {
     }
 
     #[inline]
-    fn unlock(&self, state: &Self::State, wake: bool) {
+    fn unlock(&self, state: &Self::State, wake: bool) -> bool {
+        let mut change = false;
         for (state, mask) in state.0.iter().zip(self) {
-            mask.unlock(state, false);
+            change |= mask.unlock(state, false);
         }
-        state.1.fetch_add(1, Release);
-        if wake {
-            system::wake(&state.1, u32::MAX);
+        if change {
+            state.1.fetch_add(1, Release);
+            if wake {
+                system::wake(&state.1, u32::MAX);
+            }
         }
+        change
     }
 
     #[inline]
@@ -188,17 +177,17 @@ unsafe impl<L: Lock, const N: usize> Lock for [L; N] {
     }
 
     #[inline]
-    fn add(&mut self, index: usize) -> Result<(), IndexError> {
+    fn add(&mut self, index: usize) -> bool {
         match self.get_mut(index / L::BITS) {
             Some(mask) => mask.add(index % L::BITS),
-            None => Err(IndexError::OutOfBounds(index)),
+            None => false,
         }
     }
 
     #[inline]
-    fn has(&self, index: usize) -> bool {
-        match self.get(index / L::BITS) {
-            Some(mask) => mask.has(index % L::BITS),
+    fn remove(&mut self, index: usize) -> bool {
+        match self.get_mut(index / L::BITS) {
+            Some(mask) => mask.remove(index % L::BITS),
             None => false,
         }
     }
@@ -230,12 +219,15 @@ macro_rules! tuples {
                 }
             }
             #[inline]
-            fn unlock(&self, state: &Self::State, wake: bool) {
-                $(self.$i.unlock(&state.$i, false);)+
-                state.$n.fetch_and(1, Release);
-                if wake {
-                    system::wake(&state.$n, u32::MAX);
+            fn unlock(&self, state: &Self::State, wake: bool) -> bool {
+                let change = $(self.$i.unlock(&state.$i, false) |)+ false;
+                if change {
+                    state.$n.fetch_and(1, Release);
+                    if wake {
+                        system::wake(&state.$n, u32::MAX);
+                    }
                 }
+                change
             }
             #[inline]
             fn is_locked(&self, state: &Self::State, partial: bool) -> bool {
@@ -243,13 +235,13 @@ macro_rules! tuples {
                 false
             }
             #[inline]
-            fn add(&mut self, mut index: usize) -> Result<(), IndexError> {
-                $(if index < $l::BITS { self.$i.add(index)?; return Ok(()); } else { index -= $l::BITS; })+
-                Err(IndexError::OutOfBounds(index))
+            fn add(&mut self, mut _index: usize) -> bool {
+                $(if _index < $l::BITS { return self.$i.add(_index); } else { _index -= $l::BITS; })+
+                false
             }
             #[inline]
-            fn has(&self, mut _index: usize) -> bool {
-                $(if _index < $l::BITS { return self.$i.has(_index); } else { _index -= $l::BITS; })+
+            fn remove(&mut self, mut _index: usize) -> bool {
+                $(if _index < $l::BITS { return self.$i.remove(_index); } else { _index -= $l::BITS; })+
                 false
             }
         }
