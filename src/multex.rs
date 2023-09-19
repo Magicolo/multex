@@ -35,7 +35,7 @@ impl<'a, T, L: Lock> Guard<'a, T, L> {
     }
 
     #[inline]
-    pub fn mask(&self) -> &L {
+    pub const fn mask(&self) -> &L {
         &self.1 .1
     }
 }
@@ -153,8 +153,17 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    pub fn get_mut<A: At<T>>(&mut self, key: &Key<L, A>) -> A::Item<'_> {
-        unsafe { key.indices().at(self.value.get_mut(), |_| true) }
+    pub fn get_mut(&mut self) -> &mut T {
+        self.value.get_mut()
+    }
+
+    #[inline]
+    pub fn get_mut_with<A: At<T>>(&mut self, key: &Key<L, A>) -> A::Item<'_> {
+        let mut mask = L::MAX;
+        unsafe {
+            key.indices()
+                .at(self.value.get_mut(), |index| mask.remove(index))
+        }
     }
 
     #[inline]
