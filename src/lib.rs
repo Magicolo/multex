@@ -4,8 +4,8 @@ mod multex;
 mod system;
 
 pub use key::{
-    Index, Key, One1, One10, One11, One12, One13, One14, One15, One16, One2, One3, One4, One5,
-    One6, One7, One8, One9,
+    At, Key, One1, One10, One11, One12, One13, One14, One15, One16, One2, One3, One4, One5, One6,
+    One7, One8, One9,
 };
 pub use multex::{
     Guard, Multex, Multex16, Multex16N, Multex32, Multex32N, Multex64, Multex64N, Multex8,
@@ -52,15 +52,15 @@ fn locks_all_without_panic() {
 #[test]
 fn boba() {
     let multex = Multex8::new((1u8, 2u16));
-    let key1 = Key::new(Index::<1>);
-    let key2 = Key::new((Index::<1>, Index::<0>));
+    let key1 = Key::new(At::<1>);
+    let key2 = Key::new((At::<1>, At::<0>));
     let key3 = Key::new([0, 1]);
     let key4 = Key::new((0, 1));
     let mut guard1 = multex.lock_with(&key1, false);
     let mut guard2 = multex.lock_with(&key2, false);
     let mut guard3 = multex.lock_with(&key3, false);
     let mut guard4 = multex.lock_with(&key4, false);
-    **guard1.as_mut().unwrap() += 1;
+    **guard1.as_mut().as_mut().unwrap() += 1;
     **guard2.1.as_mut().unwrap() += 1;
     match guard3[0].as_mut().unwrap() {
         One2::T0(_1) => **_1 += 1,
@@ -101,6 +101,15 @@ fn fett() {
     let mut guard2 = multex2.lock_with(&key2, false);
     if let (Some(One4::T1(a)), Some(One4::T2(b))) = &mut *guard2 {
         a.push('a');
+        **b += 1;
+    }
+}
+
+fn jango() {
+    let multex = MultexN::<_, 100>::new((1u16, 2u8, 3i32));
+    let mut a = multex.lock_with(&Key::new((0, At::<1>)), false);
+    if let (Some(One3::T0(a)), Some(b)) = a.as_mut() {
+        **a += 1;
         **b += 1;
     }
 }

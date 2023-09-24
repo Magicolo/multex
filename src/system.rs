@@ -38,6 +38,7 @@ pub fn wake<S, M>(state: &S, mask: M) {
 pub fn wait<S, V, M>(state: &S, value: V, _: M) {
     use std::mem::size_of;
     debug_assert_eq!(size_of::<S>(), size_of::<V>());
+
     unsafe {
         windows_sys::Win32::System::Threading::WaitOnAddress(
             state as *const _ as *const _,

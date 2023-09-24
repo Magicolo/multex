@@ -1,5 +1,5 @@
 use crate::{
-    key::{At, Key},
+    key::{Get, Key},
     lock::Lock,
 };
 use std::{
@@ -43,18 +43,35 @@ impl<'a, T, L: Lock> Guard<'a, T, L> {
 impl<T, L: Lock> Deref for Guard<'_, T, L> {
     type Target = T;
 
+    #[inline]
     fn deref(&self) -> &Self::Target {
         &self.0
     }
 }
 
 impl<T, L: Lock> DerefMut for Guard<'_, T, L> {
+    #[inline]
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.0
     }
 }
 
+impl<T, L: Lock> AsRef<T> for Guard<'_, T, L> {
+    #[inline]
+    fn as_ref(&self) -> &T {
+        &self.0
+    }
+}
+
+impl<T, L: Lock> AsMut<T> for Guard<'_, T, L> {
+    #[inline]
+    fn as_mut(&mut self) -> &mut T {
+        &mut self.0
+    }
+}
+
 impl<L: Lock> Drop for Inner<'_, L> {
+    #[inline]
     fn drop(&mut self) {
         self.1.unlock(self.0, true);
     }
@@ -101,7 +118,11 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    pub fn lock_with<A: At<T>>(&self, key: &Key<L, A>, partial: bool) -> Guard<'_, A::Item<'_>, L> {
+    pub fn lock_with<G: Get<T>>(
+        &self,
+        key: &Key<L, G>,
+        partial: bool,
+    ) -> Guard<'_, G::Item<'_>, L> {
         match key.mask().lock(&self.state, partial, true) {
             Some(mask) => unsafe { self.guard_with(mask, key) },
             None => unreachable!(),
@@ -109,11 +130,11 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    pub fn try_lock_with<A: At<T>>(
+    pub fn try_lock_with<G: Get<T>>(
         &self,
-        key: &Key<L, A>,
+        key: &Key<L, G>,
         partial: bool,
-    ) -> Option<Guard<'_, A::Item<'_>, L>> {
+    ) -> Option<Guard<'_, G::Item<'_>, L>> {
         let mask = key.mask().lock(&self.state, partial, false)?;
         Some(unsafe { self.guard_with(mask, key) })
     }
@@ -138,7 +159,7 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     /// This method is marked as `unsafe` because it may unlock bits that are still locked by a [`Guard`]. A wrong usage of unlock will
     /// allow multiple concurrent mutable references to exist, thus causing undefined behavior.
     #[inline]
-    pub unsafe fn unlock_with<A: At<T>>(&self, mask: &L) {
+    pub unsafe fn unlock_with<G: Get<T>>(&self, mask: &L) {
         mask.unlock(&self.state, true);
     }
 
@@ -148,7 +169,7 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    pub fn is_locked_with<A: At<T>>(&self, key: &Key<L, A>, partial: bool) -> bool {
+    pub fn is_locked_with<G: Get<T>>(&self, key: &Key<L, G>, partial: bool) -> bool {
         key.mask().is_locked(&self.state, partial)
     }
 
@@ -158,11 +179,11 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    pub fn get_mut_with<A: At<T>>(&mut self, key: &Key<L, A>) -> A::Item<'_> {
+    pub fn get_mut_with<G: Get<T>>(&mut self, key: &Key<L, G>) -> G::Item<'_> {
         let mut mask = L::MAX;
         unsafe {
             key.indices()
-                .at(self.value.get_mut(), |index| mask.remove(index))
+                .get(self.value.get_mut(), |index| mask.remove(index))
         }
     }
 
@@ -173,9 +194,9 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    unsafe fn guard_with<A: At<T>>(&self, mut mask: L, key: &Key<L, A>) -> Guard<A::Item<'_>, L> {
+    unsafe fn guard_with<G: Get<T>>(&self, mut mask: L, key: &Key<L, G>) -> Guard<G::Item<'_>, L> {
         let mut inner = Inner(&self.state, L::ZERO);
-        let item = key.indices().at(self.value.get(), |index| {
+        let item = key.indices().get(self.value.get(), |index| {
             mask.remove(index) && inner.1.add(index)
         });
         // Unlock bits that were not used in the key.
