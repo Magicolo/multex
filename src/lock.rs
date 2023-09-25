@@ -1,5 +1,8 @@
 use crate::system;
-use std::sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering::*};
+use std::{
+    marker::PhantomData,
+    sync::atomic::{AtomicU16, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering::*},
+};
 
 pub unsafe trait Lock: Sized {
     type State;
@@ -15,6 +18,32 @@ pub unsafe trait Lock: Sized {
     fn remove(&mut self, index: usize) -> bool;
 }
 
+struct Unlock<T = ()>(PhantomData<T>);
+const WAIT: u32 = 1 << 0;
+
+impl<T> Unlock<T> {
+    #[inline]
+    const fn bit(index: usize) -> u32 {
+        1 << (index % u32::BITS as usize)
+    }
+
+    #[inline]
+    fn wake(state: &AtomicU32, mask: u32, wake: bool) -> bool {
+        if mask == 0 {
+            false
+        } else if wake {
+            let value = state.fetch_and(!WAIT, Release);
+            if value & WAIT == WAIT {
+                state.fetch_add(2, Release);
+                system::wake(state, mask);
+            }
+            true
+        } else {
+            true
+        }
+    }
+}
+
 macro_rules! lock {
     ($v:ty, $a:ty) => {
         unsafe impl Lock for $v {
@@ -25,7 +54,6 @@ macro_rules! lock {
             #[allow(clippy::declare_interior_mutable_const)]
             const NEW: Self::State = <$a>::new(0);
 
-            #[inline]
             fn lock(&self, state: &Self::State, partial: bool, wait: bool) -> Option<Self> {
                 #[inline]
                 fn lock_once(state: &$a, mask: $v) -> Result<$v, $v> {
@@ -38,6 +66,7 @@ macro_rules! lock {
                     })
                 }
 
+                #[inline]
                 fn lock_wait(state: &$a, mask: $v) -> $v {
                     loop {
                         match lock_once(state, mask) {
@@ -47,30 +76,85 @@ macro_rules! lock {
                     }
                 }
 
+                // const CONTENTION: $v = (1 as $v << (<$v>::BITS as usize - 1));
+                // fn lock_wait(state: &$a, mask: $v) -> $v {
+                //     let mut old = state.load(Acquire);
+                //     loop {
+                //         if old & mask == 0 {
+                //             match state.compare_exchange_weak(old, old | mask, Acquire, Relaxed) {
+                //                 Ok(_) => break mask,
+                //                 Err(value) => { old = value; continue; }
+                //             }
+                //         } else if old & CONTENTION == 0 {
+                //             old = spin(state, mask, state.fetch_or(CONTENTION, Acquire));
+                //             continue;
+                //         } else {
+                //             system::wait(state, old, mask);
+                //             old = state.load(Acquire);
+                //         }
+                //     }
+                // }
+
+                // fn spin(state: &$a, mask: $v, mut old: $v) -> $v {
+                //     for _ in 0..10 {
+                //         let new = old & mask;
+                //         if new == 0 {
+                //             break;
+                //         } else {
+                //             hint::spin_loop();
+                //             old = state.load(Relaxed);
+                //         }
+                //     }
+                //     old
+                // }
+
                 let mask = *self;
-                if mask == Self::ZERO {
+                if mask == 0 {
                     Some(mask)
                 } else if partial {
                     Some(state.fetch_or(mask, Acquire) ^ mask & mask)
                 } else if wait {
                     Some(lock_wait(state, mask))
+                } else if lock_once(state, mask).is_ok() {
+                    Some(mask)
                 } else {
-                    lock_once(state, mask).ok()
+                    None
                 }
             }
 
             #[inline]
             fn unlock(&self, state: &Self::State, wake: bool) -> bool {
                 let mask = *self;
-                if mask == Self::ZERO {
+                if mask == 0 {
                     return false;
                 }
-                let change = state.fetch_and(!mask, Release) & mask != 0;
-                if change && wake {
+
+                let value = state.fetch_and(!mask, Release);
+                if value & mask == 0 {
+                    false
+                } else if wake {
                     system::wake(state, mask);
+                    true
+                } else {
+                    true
                 }
-                change
             }
+
+            // #[inline]
+            // fn unlock(&self, state: &Self::State, wake: bool) -> bool {
+            //     const CONTENTION: $v = (1 as $v << (<$v>::BITS as usize - 1));
+
+            //     let mask = *self;
+            //     if mask == Self::ZERO {
+            //         return false;
+            //     }
+            //     let bits = mask | CONTENTION;
+            //     let value = state.fetch_and(!bits, Release);
+            //     if wake && value & CONTENTION == CONTENTION {
+            //         system::wake(state, mask);
+            //     }
+            //     value & bits != 0
+            // }
 
             #[inline]
             fn is_locked(&self, state: &Self::State, partial: bool) -> bool {
@@ -113,6 +197,18 @@ lock!(u32, AtomicU32);
 lock!(u64, AtomicU64);
 lock!(usize, AtomicUsize);
 
+impl<L: Lock, const N: usize> Unlock<[L; N]> {
+    fn unlock(state: &<[L; N] as Lock>::State, masks: &[L], wake: bool) -> bool {
+        let mut mask = 0;
+        for (index, pair) in state.0.iter().zip(masks).enumerate() {
+            if pair.1.unlock(pair.0, false) {
+                mask |= Self::bit(index);
+            }
+        }
+        Self::wake(&state.1, mask, wake)
+    }
+}
+
 unsafe impl<L: Lock, const N: usize> Lock for [L; N] {
     type State = ([L::State; N], AtomicU32);
     const MAX: Self = [L::MAX; N];
@@ -121,9 +217,8 @@ unsafe impl<L: Lock, const N: usize> Lock for [L; N] {
     const NEW: Self::State = ([L::NEW; N], AtomicU32::new(0));
 
     fn lock(&self, state: &Self::State, partial: bool, wait: bool) -> Option<Self> {
-        loop {
+        'outer: loop {
             let mut masks = Self::ZERO;
-            let mut done = true;
             let value = if wait {
                 state.1.load(Acquire)
             } else {
@@ -132,38 +227,29 @@ unsafe impl<L: Lock, const N: usize> Lock for [L; N] {
             for (index, pair) in state.0.iter().zip(self).enumerate() {
                 match pair.1.lock(pair.0, partial, false) {
                     Some(mask) => masks[index] = mask,
+                    None if wait && value & WAIT == WAIT => {
+                        Unlock::<Self>::unlock(state, &masks[..index], true);
+                        system::wait(&state.1, value, Unlock::<Self>::bit(index));
+                        continue 'outer;
+                    }
+                    None if wait => {
+                        Unlock::<Self>::unlock(state, &masks[..index], true);
+                        state.1.fetch_or(WAIT, Release);
+                        continue 'outer;
+                    }
                     None => {
-                        // The `masks` ensures that only locks that were taken are unlocked.
-                        masks.unlock(state, true);
-                        if wait {
-                            system::wait(&state.1, value, u32::MAX);
-                            done = false;
-                            break;
-                        } else {
-                            return None;
-                        }
+                        Unlock::<Self>::unlock(state, &masks[..index], true);
+                        break 'outer None;
                     }
                 }
             }
-            if done {
-                return Some(masks);
-            }
+            break Some(masks);
         }
     }
 
     #[inline]
     fn unlock(&self, state: &Self::State, wake: bool) -> bool {
-        let mut change = false;
-        for (state, mask) in state.0.iter().zip(self) {
-            change |= mask.unlock(state, false);
-        }
-        if change {
-            state.1.fetch_add(1, Release);
-            if wake {
-                system::wake(&state.1, u32::MAX);
-            }
-        }
-        change
+        Unlock::<Self>::unlock(state, self, wake)
     }
 
     #[inline]
@@ -195,6 +281,14 @@ unsafe impl<L: Lock, const N: usize> Lock for [L; N] {
 
 macro_rules! tuples {
     ($n:tt, $($l:ident, $i:tt),+) => {
+        impl<$($l: Lock),+> Unlock<($($l,)+)> {
+            pub fn unlock(state: &<($($l,)+) as Lock>::State, masks: &($($l,)+), count: usize, wake: bool) -> bool {
+                let mut mask = 0;
+                'main: { $(if $i < count { if masks.$i.unlock(&state.$i, false) { mask |= Self::bit($i); } } else { break 'main; })+ }
+                Self::wake(&state.$n, mask, wake)
+            }
+        }
+
         unsafe impl<$($l: Lock),+> Lock for ($($l,)+) {
             type State = ($($l::State,)+ AtomicU32);
             const MAX: Self = ($($l::MAX,)+);
@@ -208,11 +302,20 @@ macro_rules! tuples {
                     let value = if wait { state.$n.load(Acquire) } else { u32::MAX };
                     $(match self.$i.lock(&state.$i, partial, false) {
                         Some(mask) => masks.$i = mask,
+                        None if wait && value & WAIT == WAIT => {
+                            // TODO: unlock.
+                            Unlock::<Self>::unlock(state, &masks, $i, true);
+                            system::wait(&state.1, value, Unlock::<Self>::bit($i));
+                            continue;
+                        }
+                        None if wait => {
+                            // TODO: unlock.
+                            state.$n.fetch_or(WAIT, Release);
+                            continue;
+                        }
                         None => {
-                            // The `masks` ensures that only locks that were taken are unlocked.
-                            masks.unlock(state, true);
-                            if wait { system::wait(&state.1, value, u32::MAX); continue; }
-                            else { break None; }
+                            // TODO: unlock.
+                            break None;
                         }
                     })+
                     break Some(masks);
@@ -220,14 +323,7 @@ macro_rules! tuples {
             }
             #[inline]
             fn unlock(&self, state: &Self::State, wake: bool) -> bool {
-                let change = $(self.$i.unlock(&state.$i, false) |)+ false;
-                if change {
-                    state.$n.fetch_and(1, Release);
-                    if wake {
-                        system::wake(&state.$n, u32::MAX);
-                    }
-                }
-                change
+                Unlock::<Self>::unlock(state, self, $n, wake)
             }
             #[inline]
             fn is_locked(&self, state: &Self::State, partial: bool) -> bool {

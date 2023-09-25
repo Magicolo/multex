@@ -17,7 +17,7 @@ fn standard_mutex(criterion: &mut Criterion) {
                 let mutexes = [(); COUNT].map(|_| std::sync::Mutex::new(0));
                 let batches = (0..batch)
                     .map(|i| OFFSETS.map(|offset| &mutexes[(i + offset) % COUNT]))
-                    .collect::<Box<[_]>>();
+                    .collect::<Box<_>>();
                 bencher.iter(|| {
                     pool.scope(|scope| {
                         for (i, mutexes) in batches.iter().enumerate() {
@@ -48,7 +48,7 @@ fn parking_lot_mutex(criterion: &mut Criterion) {
                 let mutexes = [(); COUNT].map(|_| parking_lot::Mutex::new(0));
                 let batches = (0..batch)
                     .map(|i| OFFSETS.map(|offset| &mutexes[(i + offset) % COUNT]))
-                    .collect::<Box<[_]>>();
+                    .collect::<Box<_>>();
                 bencher.iter(|| {
                     pool.scope(|scope| {
                         for (i, mutexes) in batches.iter().enumerate() {
@@ -101,5 +101,5 @@ fn multex(criterion: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, multex, standard_mutex, parking_lot_mutex);
+criterion_group!(benches, multex, parking_lot_mutex, standard_mutex);
 criterion_main!(benches);

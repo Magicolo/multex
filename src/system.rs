@@ -12,7 +12,8 @@ pub fn wait<S, V, M>(state: &S, value: V, mask: M) {
             value,
             null::<libc::timespec>(),
             null::<u32>(),
-            mask, // TODO: Convert mask to u32. Deal with overflows. At least 1 bit must be one, otherwise u32::MAX?
+            // TODO: Convert mask to u32. For u64, bit or the bottom 32 bits with the top 32 bits.
+            mask,
         )
     };
 }
@@ -28,7 +29,8 @@ pub fn wake<S, M>(state: &S, mask: M) {
             u32::MAX,
             null::<libc::timespec>(),
             null::<u32>(),
-            mask, // TODO: Convert to u32.
+            // TODO: Convert mask to u32. For u64, bit or the bottom 32 bits with the top 32 bits.
+            mask,
         )
     };
 }

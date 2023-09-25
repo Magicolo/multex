@@ -14,6 +14,14 @@ pub use multex::{
 
 /*
     TODO:
+    - Add timeouts for `Multex` methods that might wait.
+    - Compose keys with lock settings. This must modify the return type.
+        - Key<_, At<0>> returns '&mut T'.
+        - Key<_, Partial<At<0>>> returns 'Option<&mut T>'.
+        - Key<_, Timeout<(At<0>, At<1>)> returns 'Option<(&mut T, &mut T)>'.
+        - Is there a way to prevent redundance (ex: Partial<Partial<At<0>>>)?
+        - Using types, reduces the size of the key.
+
     - How to get deadlock detection?
     - How to get re-entrant detection?
 */
@@ -106,7 +114,7 @@ fn fett() {
 }
 
 fn jango() {
-    let multex = MultexN::<_, 100>::new((1u16, 2u8, 3i32));
+    let multex = MultexN::<_, 2>::new((1u16, 2u8, 3i32));
     let mut a = multex.lock_with(&Key::new((0, At::<1>)), false);
     if let (Some(One3::T0(a)), Some(b)) = a.as_mut() {
         **a += 1;
