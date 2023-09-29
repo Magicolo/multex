@@ -1,7 +1,13 @@
-use crate::lock::Lock;
+use crate::lock::Mask;
 use std::{alloc::Layout, array::from_fn, mem::transmute};
 
-pub struct Key<L, G>(L, G);
+pub struct Key<L, G> {
+    pub(crate) mask: L,
+    pub(crate) source: L,
+    pub(crate) target: L,
+    pub(crate) indices: G,
+}
+
 pub struct At<const I: usize>;
 
 #[repr(C)]
@@ -25,23 +31,16 @@ pub unsafe trait Get<T: ?Sized> {
         T: 'a;
 }
 
-impl<L: Lock, F: Fold<usize>> Key<L, F> {
+impl<M: Mask, F: Fold<usize>> Key<M, F> {
     pub fn new(indices: F) -> Self {
-        let mut mask = L::ZERO;
+        let mut mask = M::new();
         indices.fold(true, |_, index| mask.add(index));
-        Self(mask, indices)
-    }
-}
-
-impl<L, G> Key<L, G> {
-    #[inline]
-    pub const fn mask(&self) -> &L {
-        &self.0
-    }
-
-    #[inline]
-    pub const fn indices(&self) -> &G {
-        &self.1
+        Self {
+            mask,
+            source: M::new(),
+            target: M::new(),
+            indices,
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 use crate::{
     key::{Get, Key},
-    lock::Lock,
+    lock::{Lock, LockAll},
 };
 use std::{
     cell::UnsafeCell,
@@ -24,9 +24,35 @@ pub type Multex64N<T, const N: usize> = Multex<T, [u64; N]>;
 pub struct Guard<'a, T, L: Lock>(T, Inner<'a, L>);
 /// [`Inner`] should be kept separate from [`Guard`] such that its [`Drop`] implementation is called even if
 /// a panic occurs when the value `T` is produced.
-struct Inner<'a, L: Lock>(&'a L::State, L);
+struct Inner<'a, L: Lock>(&'a L::State, Borrow<'a, L>);
+enum Borrow<'a, T> {
+    Own(T),
+    Mut(&'a mut T),
+}
 
 unsafe impl<T: Sync, L: Lock> Sync for Multex<T, L> {}
+
+impl<T> Deref for Borrow<'_, T> {
+    type Target = T;
+
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Borrow::Own(value) => value,
+            Borrow::Mut(value) => value,
+        }
+    }
+}
+
+impl<T> DerefMut for Borrow<'_, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match self {
+            Borrow::Own(value) => value,
+            Borrow::Mut(value) => value,
+        }
+    }
+}
 
 impl<'a, T, L: Lock> Guard<'a, T, L> {
     #[inline]
@@ -35,7 +61,7 @@ impl<'a, T, L: Lock> Guard<'a, T, L> {
     }
 
     #[inline]
-    pub const fn mask(&self) -> &L {
+    pub fn mask(&self) -> &L {
         &self.1 .1
     }
 }
@@ -74,6 +100,7 @@ impl<L: Lock> Drop for Inner<'_, L> {
     #[inline]
     fn drop(&mut self) {
         self.1.unlock(self.0, true);
+        self.1.clear();
     }
 }
 
@@ -92,6 +119,51 @@ impl<T, L: Lock> Multex<T, L> {
     }
 }
 
+impl<T: ?Sized, L: LockAll> Multex<T, L> {
+    #[inline]
+    pub fn lock(&self) -> Guard<'_, &mut T, L> {
+        let mut mask = L::ALL;
+        if L::ALL.lock(&self.state, &mut mask, false, true) {
+            unsafe { self.guard(mask) }
+        } else {
+            unreachable!()
+        }
+    }
+
+    #[inline]
+    pub fn try_lock(&self) -> Option<Guard<&mut T, L>> {
+        let mut mask = L::ALL;
+        if L::ALL.lock(&self.state, &mut mask, false, false) {
+            Some(unsafe { self.guard(mask) })
+        } else {
+            None
+        }
+    }
+
+    /// Forcefully unlocks all the bits. A normal usage of a [`Multex`] normally doesn't require to unlock manually
+    /// since the [`Guard`] already does it automatically. This method is mainly meant to be used when [`std::mem::forget(guard)`] is
+    /// used.
+    ///
+    /// # Safety
+    /// This method is marked as `unsafe` because it may unlock bits that are still locked by a [`Guard`]. A wrong usage of unlock will
+    /// allow multiple concurrent mutable references to exist, thus causing undefined behavior.
+    #[inline]
+    pub unsafe fn unlock(&self) {
+        L::ALL.unlock(&self.state, true);
+    }
+
+    #[inline]
+    pub fn is_locked(&self, partial: bool) -> bool {
+        L::ALL.is_locked(&self.state, partial)
+    }
+
+    #[inline]
+    unsafe fn guard(&self, mask: L) -> Guard<&mut T, L> {
+        let inner = Inner(&self.state, Borrow::Own(mask));
+        Guard(unsafe { &mut *self.value.get() }, inner)
+    }
+}
+
 impl<T: ?Sized, L: Lock> Multex<T, L> {
     #[inline]
     pub const fn as_ptr(&self) -> *const T {
@@ -104,51 +176,29 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    pub fn lock(&self) -> Guard<'_, &mut T, L> {
-        match L::MAX.lock(&self.state, false, true) {
-            Some(mask) => unsafe { self.guard(mask) },
-            None => unreachable!(),
+    pub fn lock_with<'a, G: Get<T>>(
+        &'a self,
+        key: &'a mut Key<L, G>,
+        partial: bool,
+    ) -> Guard<'a, G::Item<'a>, L> {
+        if key.mask.lock(&self.state, &mut key.source, partial, true) {
+            unsafe { self.guard_with(key) }
+        } else {
+            unreachable!()
         }
     }
 
     #[inline]
-    pub fn try_lock(&self) -> Option<Guard<&mut T, L>> {
-        let mask = L::MAX.lock(&self.state, false, false)?;
-        Some(unsafe { self.guard(mask) })
-    }
-
-    #[inline]
-    pub fn lock_with<G: Get<T>>(
-        &self,
-        key: &Key<L, G>,
+    pub fn try_lock_with<'a, G: Get<T>>(
+        &'a self,
+        key: &'a mut Key<L, G>,
         partial: bool,
-    ) -> Guard<'_, G::Item<'_>, L> {
-        match key.mask().lock(&self.state, partial, true) {
-            Some(mask) => unsafe { self.guard_with(mask, key) },
-            None => unreachable!(),
+    ) -> Option<Guard<'a, G::Item<'a>, L>> {
+        if key.mask.lock(&self.state, &mut key.source, partial, false) {
+            Some(unsafe { self.guard_with(key) })
+        } else {
+            None
         }
-    }
-
-    #[inline]
-    pub fn try_lock_with<G: Get<T>>(
-        &self,
-        key: &Key<L, G>,
-        partial: bool,
-    ) -> Option<Guard<'_, G::Item<'_>, L>> {
-        let mask = key.mask().lock(&self.state, partial, false)?;
-        Some(unsafe { self.guard_with(mask, key) })
-    }
-
-    /// Forcefully unlocks all the bits. A normal usage of a [`Multex`] normally doesn't require to unlock manually
-    /// since the [`Guard`] already does it automatically. This method is mainly meant to be used when [`std::mem::forget(guard)`] is
-    /// used.
-    ///
-    /// # Safety
-    /// This method is marked as `unsafe` because it may unlock bits that are still locked by a [`Guard`]. A wrong usage of unlock will
-    /// allow multiple concurrent mutable references to exist, thus causing undefined behavior.
-    #[inline]
-    pub unsafe fn unlock(&self) {
-        L::MAX.unlock(&self.state, true);
     }
 
     /// Forcefully unlocks the bits contained in the provided `mask`. A normal usage of a [`Multex`] normally doesn't require to unlock
@@ -164,13 +214,8 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    pub fn is_locked(&self, partial: bool) -> bool {
-        L::MAX.is_locked(&self.state, partial)
-    }
-
-    #[inline]
     pub fn is_locked_with<G: Get<T>>(&self, key: &Key<L, G>, partial: bool) -> bool {
-        key.mask().is_locked(&self.state, partial)
+        key.mask.is_locked(&self.state, partial)
     }
 
     #[inline]
@@ -179,28 +224,22 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    pub fn get_mut_with<G: Get<T>>(&mut self, key: &Key<L, G>) -> G::Item<'_> {
-        let mut mask = L::MAX;
-        unsafe {
-            key.indices()
-                .get(self.value.get_mut(), |index| mask.remove(index))
-        }
+    pub fn get_mut_with<G: Get<T>>(&mut self, key: &mut Key<L, G>) -> G::Item<'_> {
+        key.source.clear();
+        let value = self.value.get_mut();
+        unsafe { key.indices.get(value, |index| key.source.add(index)) }
     }
 
     #[inline]
-    unsafe fn guard(&self, mask: L) -> Guard<&mut T, L> {
-        let inner = Inner(&self.state, mask);
-        Guard(unsafe { &mut *self.value.get() }, inner)
-    }
-
-    #[inline]
-    unsafe fn guard_with<G: Get<T>>(&self, mut mask: L, key: &Key<L, G>) -> Guard<G::Item<'_>, L> {
-        let mut inner = Inner(&self.state, L::ZERO);
-        let item = key.indices().get(self.value.get(), |index| {
-            mask.remove(index) && inner.1.add(index)
+    unsafe fn guard_with<'a, G: Get<T>>(
+        &'a self,
+        key: &'a mut Key<L, G>,
+    ) -> Guard<'a, G::Item<'a>, L> {
+        let item = key.indices.get(self.value.get(), |index| {
+            key.source.remove(index) && key.target.add(index)
         });
         // Unlock bits that were not used in the key.
-        mask.unlock(&self.state, true);
-        Guard(item, inner)
+        key.source.unlock(&self.state, true);
+        Guard(item, Inner(&self.state, Borrow::Mut(&mut key.target)))
     }
 }
