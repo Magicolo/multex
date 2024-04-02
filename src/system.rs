@@ -1,7 +1,7 @@
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[inline]
 pub fn wait<S, V, M>(state: &S, value: V, mask: M) {
-    use std::mem::size_of;
+    use std::{mem::size_of, ptr::null};
     debug_assert_eq!(size_of::<S>(), size_of::<V>());
     debug_assert_eq!(size_of::<S>(), size_of::<M>());
     unsafe {
@@ -21,6 +21,7 @@ pub fn wait<S, V, M>(state: &S, value: V, mask: M) {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[inline]
 pub fn wake<S, M>(state: &S, mask: M) {
+    use std::ptr::null;
     unsafe {
         libc::syscall(
             libc::SYS_futex,
