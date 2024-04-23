@@ -12,7 +12,7 @@ pub fn wait<S, V, M>(state: &S, value: V, mask: M) {
             value,
             null::<libc::timespec>(),
             null::<u32>(),
-            // TODO: Convert mask to u32. For u64, bit or the bottom 32 bits with the top 32 bits.
+            // TODO: Convert mask to u32. For u64, bit-or the bottom 32 bits with the top 32 bits.
             mask,
         )
     };
