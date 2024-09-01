@@ -1,4 +1,5 @@
 use crate::lock::Mask;
+use orn::*;
 use std::{alloc::Layout, array::from_fn, mem::transmute};
 
 pub struct Key<L, G> {
@@ -146,7 +147,7 @@ unsafe impl<T> Get<[T]> for usize {
     where
         [T]: 'a,
     {
-        let raw = transmute::<_, RawSlice<T>>(items);
+        let raw = transmute::<*mut [T], RawSlice<T>>(items);
         let index = *self;
         if index < raw.1 && filter(index) {
             Some(&mut *raw.0.add(index))
@@ -212,7 +213,7 @@ unsafe impl<T> Get<Vec<T>> for usize {
         Vec<T>: 'a,
     {
         let raw = items.cast::<RawVec<T>>().read();
-        let slice = transmute::<_, *mut [T]>(RawSlice(raw.0, raw.2));
+        let slice = transmute::<RawSlice<T>, *mut [T]>(RawSlice(raw.0, raw.2));
         <Self as Get<[T]>>::get(self, slice, filter)
     }
 }
@@ -258,6 +259,29 @@ where
         *mut T: 'a,
     {
         <Self as Get<T>>::get(self, items.read(), filter)
+    }
+}
+
+unsafe impl<T, G: Get<T>> Get<T> for Vec<G> {
+    type Item<'a> = Vec<G::Item<'a>>
+        where
+            Self: 'a,
+            T: 'a;
+
+    #[inline]
+    unsafe fn get<'a, F: FnMut(usize) -> bool>(
+        &self,
+        items: *mut T,
+        mut filter: F,
+    ) -> Self::Item<'a>
+    where
+        T: 'a,
+    {
+        let mut values = Vec::new();
+        for get in self {
+            values.push(get.get(items, &mut filter));
+        }
+        values
     }
 }
 
@@ -313,35 +337,9 @@ unsafe impl<T, G: Get<T>> Get<T> for &mut G {
 }
 
 macro_rules! tuples {
-    ($n:expr, $one:ident $(, $tn:ident, $ti:ident, $i:tt)+) => {
-        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-        pub enum $one<$($tn),+> { $($tn($tn)),+ }
-
-        impl<$($tn),+> $one<$($tn),+> {
-            #[inline]
-            pub fn unify<T>(self) -> T where $($tn: Into<T>),+ {
-                match self {
-                    $(Self::$tn(item) => item.into(),)+
-                }
-            }
-
-            #[inline]
-            pub const fn as_ref(&self) -> $one<$(&$tn,)+> {
-                match self {
-                    $(Self::$tn(item) => $one::$tn(item),)+
-                }
-            }
-
-            #[inline]
-            pub fn as_mut(&mut self) -> $one<$(&mut $tn,)+> {
-                match self {
-                    $(Self::$tn(item) => $one::$tn(item),)+
-                }
-            }
-        }
-
+    ($n:expr, $or:ident $(, $tn:ident, $ti:ident, $i:tt)+) => {
         unsafe impl<$($tn,)+> Get<($($tn,)+)> for usize {
-            type Item<'a> = Option<$one<$(&'a mut $tn),+>> where Self: 'a, ($($tn,)+): 'a;
+            type Item<'a> = Option<$or<$(&'a mut $tn),+>> where Self: 'a, ($($tn,)+): 'a;
 
             #[inline]
             unsafe fn get<'a, F: FnMut(usize) -> bool>(&self, items: *mut ($($tn,)+), mut filter: F) -> Self::Item<'a> where ($($tn,)+): 'a {
@@ -349,7 +347,7 @@ macro_rules! tuples {
                 let mut _layout = Layout::new::<()>();
                 let offsets = ($({ let pair = _layout.extend(Layout::new::<$tn>()).unwrap(); _layout = pair.0; pair.1 },)+);
                 match index {
-                    $($i if filter($i) => Some($one::$tn(unsafe { &mut *items.cast::<u8>().add(offsets.$i).cast::<$tn>() })),)+
+                    $($i if filter($i) => Some($or::$tn(unsafe { &mut *items.cast::<u8>().add(offsets.$i).cast::<$tn>() })),)+
                     _ => None,
                 }
             }
@@ -395,46 +393,46 @@ macro_rules! at {
     };
 }
 
-tuples!(1, One1, T0, I0, 0);
-tuples!(2, One2, T0, I0, 0, T1, I1, 1);
-tuples!(3, One3, T0, I0, 0, T1, I1, 1, T2, I2, 2);
-tuples!(4, One4, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3);
-tuples!(5, One5, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4);
-tuples!(6, One6, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5);
-tuples!(7, One7, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6);
+tuples!(1, Or1, T0, I0, 0);
+tuples!(2, Or2, T0, I0, 0, T1, I1, 1);
+tuples!(3, Or3, T0, I0, 0, T1, I1, 1, T2, I2, 2);
+tuples!(4, Or4, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3);
+tuples!(5, Or5, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4);
+tuples!(6, Or6, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5);
+tuples!(7, Or7, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6);
 tuples!(
-    8, One8, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7, 7
+    8, Or8, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7, 7
 );
 tuples!(
-    9, One9, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
+    9, Or9, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
     7, T8, I8, 8
 );
 tuples!(
-    10, One10, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
+    10, Or10, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
     7, T8, I8, 8, T9, I9, 9
 );
 tuples!(
-    11, One11, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
+    11, Or11, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
     7, T8, I8, 8, T9, I9, 9, T10, I10, 10
 );
 tuples!(
-    12, One12, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
+    12, Or12, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
     7, T8, I8, 8, T9, I9, 9, T10, I10, 10, T11, I11, 11
 );
 tuples!(
-    13, One13, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
+    13, Or13, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
     7, T8, I8, 8, T9, I9, 9, T10, I10, 10, T11, I11, 11, T12, I12, 12
 );
 tuples!(
-    14, One14, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
+    14, Or14, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
     7, T8, I8, 8, T9, I9, 9, T10, I10, 10, T11, I11, 11, T12, I12, 12, T13, I13, 13
 );
 tuples!(
-    15, One15, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
+    15, Or15, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
     7, T8, I8, 8, T9, I9, 9, T10, I10, 10, T11, I11, 11, T12, I12, 12, T13, I13, 13, T14, I14, 14
 );
 tuples!(
-    16, One16, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
+    16, Or16, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
     7, T8, I8, 8, T9, I9, 9, T10, I10, 10, T11, I11, 11, T12, I12, 12, T13, I13, 13, T14, I14, 14,
     T15, I15, 15
 );

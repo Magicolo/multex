@@ -83,38 +83,6 @@ macro_rules! lock {
                     }
                 }
 
-                // const CONTENTION: $v = (1 as $v << (<$v>::BITS as usize - 1));
-                // fn lock_wait(state: &$a, mask: $v) -> $v {
-                //     let mut old = state.load(Acquire);
-                //     loop {
-                //         if old & mask == 0 {
-                //             match state.compare_exchange_weak(old, old | mask, Acquire, Relaxed) {
-                //                 Ok(_) => break mask,
-                //                 Err(value) => { old = value; continue; }
-                //             }
-                //         } else if old & CONTENTION == CONTENTION {
-                //             system::wait(state, old, mask);
-                //             old = state.load(Acquire);
-                //         } else {
-                //             old = spin(state, mask, state.fetch_or(CONTENTION, Acquire));
-                //             continue;
-                //         }
-                //     }
-                // }
-
-                // fn spin(state: &$a, mask: $v, mut old: $v) -> $v {
-                //     for _ in 0..10 {
-                //         let new = old & mask;
-                //         if new == 0 {
-                //             break;
-                //         } else {
-                //             hint::spin_loop();
-                //             old = state.load(Relaxed);
-                //         }
-                //     }
-                //     old
-                // }
-
                 let mask = *self;
                 if mask == 0 {
                     *taken = 0;
@@ -150,22 +118,6 @@ macro_rules! lock {
                     true
                 }
             }
-
-            // #[inline]
-            // fn unlock(&self, state: &Self::State, wake: bool) -> bool {
-            //     const CONTENTION: $v = (1 as $v << (<$v>::BITS as usize - 1));
-
-            //     let mask = *self;
-            //     if mask == 0 {
-            //         return false;
-            //     }
-            //     let bits = mask | CONTENTION;
-            //     let value = state.fetch_and(!bits, Release);
-            //     if wake && value & CONTENTION == CONTENTION {
-            //         system::wake(state, mask);
-            //     }
-            //     value & bits != 0
-            // }
 
             #[inline]
             fn is_locked(&self, state: &Self::State, partial: bool) -> bool {
@@ -398,17 +350,17 @@ fn lock_all<L: Lock, D: Deref<Target = L::State>>(
             };
             if pair.1.lock(pair.0, lock, partial, false) {
                 continue;
-            } else if wait && value & WAIT == WAIT {
-                unlock_all(states, version, head, true);
-                system::wait(version, value, bit(index));
-                continue 'outer;
-            } else if wait {
-                unlock_all(states, version, head, true);
-                version.fetch_or(WAIT, Release);
-                continue 'outer;
             } else {
                 unlock_all(states, version, head, true);
-                break 'outer false;
+                if value & WAIT == WAIT {
+                    system::wait(version, value, bit(index));
+                    continue 'outer;
+                } else if wait {
+                    version.fetch_or(WAIT, Release);
+                    continue 'outer;
+                } else {
+                    break 'outer false;
+                }
             }
         }
         break true;
@@ -448,7 +400,7 @@ fn grow<T: Default>(
     old: *mut Header<T>,
     counts: (usize, usize),
 ) -> *mut Header<T> {
-    debug_assert!(counts.0 >= counts.1);
+    debug_assert!(counts.0 <= counts.1);
     let (layout, offset) = Layout::new::<Header<T>>()
         .extend(Layout::array::<Arc<T>>(counts.1).unwrap())
         .unwrap();

@@ -11,15 +11,20 @@ pub struct Multex<T: ?Sized, L: Lock = usize> {
     pub(crate) state: L::State,
     pub(crate) value: UnsafeCell<T>,
 }
-pub type MultexN<T, const N: usize> = Multex<T, [usize; N]>;
+pub type MultexA<T, const N: usize> = Multex<T, [usize; N]>;
+pub type MultexV<T> = Multex<T, Vec<usize>>;
 pub type Multex8<T> = Multex<T, u8>;
-pub type Multex8N<T, const N: usize> = Multex<T, [u8; N]>;
+pub type Multex8A<T, const N: usize> = Multex<T, [u8; N]>;
+pub type Multex8V<T> = Multex<T, Vec<u8>>;
 pub type Multex16<T> = Multex<T, u16>;
-pub type Multex16N<T, const N: usize> = Multex<T, [u16; N]>;
+pub type Multex16A<T, const N: usize> = Multex<T, [u16; N]>;
+pub type Multex16V<T> = Multex<T, Vec<u16>>;
 pub type Multex32<T> = Multex<T, u32>;
-pub type Multex32N<T, const N: usize> = Multex<T, [u32; N]>;
+pub type Multex32A<T, const N: usize> = Multex<T, [u32; N]>;
+pub type Multex32V<T> = Multex<T, Vec<u32>>;
 pub type Multex64<T> = Multex<T, u64>;
-pub type Multex64N<T, const N: usize> = Multex<T, [u64; N]>;
+pub type Multex64A<T, const N: usize> = Multex<T, [u64; N]>;
+pub type Multex64V<T> = Multex<T, Vec<u64>>;
 
 pub struct Guard<'a, T, L: Lock>(T, Inner<'a, L>);
 /// [`Inner`] should be kept separate from [`Guard`] such that its [`Drop`] implementation is called even if
