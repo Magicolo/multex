@@ -180,19 +180,6 @@ where
     }
 }
 
-// unsafe impl<'a, T: ?Sized + 'a, G: Get<'a, T>> Get<'a, T> for Vec<G> {
-//     type Item = Vec<G::Item>;
-
-//     #[inline]
-//     unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut T, mut filter: F) -> Self::Item {
-//         let mut values = Vec::with_capacity(self.len());
-//         for get in self {
-//             values.push(get.get(items, &mut filter));
-//         }
-//         values
-//     }
-// }
-
 unsafe impl<'a, T: ?Sized + 'a, G: Get<'a, T>> Get<'a, T> for [G] {
     type Item = Vec<G::Item>;
 
