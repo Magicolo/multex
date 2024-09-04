@@ -1,5 +1,5 @@
-mod key;
-mod lock;
+pub mod key;
+pub mod lock;
 mod multex;
 mod system;
 

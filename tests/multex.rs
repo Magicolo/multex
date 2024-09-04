@@ -1,54 +1,63 @@
 use multex::*;
+use std::result;
+
+type Result = result::Result<(), Box<dyn std::error::Error>>;
 
 #[test]
 fn cannot_lock_the_same_index_twice() {
-    let multex = Multex8::new([1u8, 2u8, 3u8, 4u8]);
-    let mut key = Key::new([0, 1, 0]);
-    let guard = multex.lock_with(&mut key, false);
-    assert_eq!(guard[0], Some(&mut 1u8));
-    assert_eq!(guard[1], Some(&mut 2u8));
-    assert_eq!(guard[2], None);
-}
-
-#[test]
-fn can_lock_lots_of_indices() {
-    let multex = MultexV::new((0..1000).collect::<Vec<_>>());
-    let mut key = Key::new((0..1000).collect::<Vec<usize>>());
-    let guard = multex.lock_with(&mut key, false);
-    for (mut i, item) in guard.iter().enumerate() {
-        assert_eq!(item, &Some(&mut i));
+    if let Err(error) = Key::<usize, _>::new([0, 1, 0]) {
+        assert_eq!(error.index, 0);
+    } else {
+        panic!();
     }
 }
 
 #[test]
-fn locks_different_indices() {
+fn can_lock_lots_of_indices() -> Result {
+    let mut items = (0..1000).collect::<Vec<_>>();
+    let multex = MultexV::new(&mut items);
+    let indices = (0..1000).collect::<Vec<usize>>();
+    let mut key = Key::new(indices.as_slice())?;
+    let guard = multex.lock_with(&mut key, false);
+    for (mut i, item) in guard.iter().enumerate() {
+        assert_eq!(item, &Some(&mut i));
+    }
+    Ok(())
+}
+
+#[test]
+fn locks_different_indices() -> Result {
     let multex = Multex8::new([1u8, 2u8, 3u8, 4u8]);
-    let mut key1 = Key::new([0]);
-    let mut key2 = Key::new([1]);
+    let mut key1 = Key::new([0])?;
+    let mut key2 = Key::new((1,))?;
     let mut guard1 = multex.lock_with(&mut key1, false);
     let mut guard2 = multex.lock_with(&mut key2, false);
-    let Some(value1) = guard1[0].as_mut() else {
+    let [Some(value1)] = guard1.as_mut() else {
         panic!()
     };
-    let Some(value2) = guard2[0].as_mut() else {
+    let (Some(value2),) = guard2.as_mut() else {
         panic!()
     };
     assert_eq!(**value1, 1u8);
     assert_eq!(**value2, 2u8);
-}
-
-#[test]
-fn does_not_contend_on_out_of_bounds_indices() {
-    let multex = Multex16::new([1u8, 2u8, 3u8, 4u8]);
-    let mut key1 = Key::new([0, 4]);
-    let mut key2 = Key::new([1, 4]);
-    let _guard1 = multex.lock_with(&mut key1, false);
-    let _guard2 = multex.lock_with(&mut key2, false);
+    Ok(())
 }
 
 #[test]
 fn locks_all_without_panic() {
     Multex32::new(Vec::new()).lock().push(1);
+}
+
+#[test]
+fn locks_with_unit() -> Result {
+    let multex = Multex8::new(());
+    let mut key1 = Key::new([0, 3, 5, 7])?;
+    let mut key2 = Key::new([2, 4, 5, 6])?;
+    let guard1 = multex.try_lock_with(&mut key1, false);
+    let guard2 = multex.try_lock_with(&mut key2, false);
+    assert!(guard1.is_some());
+    assert!(guard2.is_none());
+    Ok(())
 }
 
 // #[test]

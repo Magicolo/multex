@@ -13,6 +13,7 @@ use std::{
 
 pub trait Mask: Sized {
     fn new() -> Self;
+    fn has(&self, index: usize) -> bool;
     fn add(&mut self, index: usize) -> bool;
     fn remove(&mut self, index: usize) -> bool;
     fn clear(&mut self);
@@ -143,6 +144,14 @@ macro_rules! lock {
             }
 
             #[inline]
+            fn has(&self, index: usize) -> bool {
+                let Some(bit) = (1 as $v).checked_shl(index as _) else {
+                    return false;
+                };
+                *self & bit != 0
+            }
+
+            #[inline]
             fn add(&mut self, index: usize) -> bool {
                 let Some(bit) = (1 as $v).checked_shl(index as _) else {
                     return false;
@@ -201,13 +210,21 @@ macro_rules! lock {
         }
 
         impl<const N: usize> LockAll for [$v; N] {
-            const ALL: Self = [0; N];
+            const ALL: Self = [!0; N];
         }
 
         impl<const N: usize> Mask for [$v; N] {
             #[inline]
             fn new() -> Self {
                 [0; N]
+            }
+
+            #[inline]
+            fn has(&self, index: usize) -> bool {
+                match self.get(index / <$v>::BITS as usize) {
+                    Some(mask) => mask.has(index % <$v>::BITS as usize),
+                    None => false,
+                }
             }
 
             #[inline]
@@ -268,6 +285,14 @@ macro_rules! lock {
             #[inline]
             fn new() -> Self {
                 Vec::new()
+            }
+
+            #[inline]
+            fn has(&self, index: usize) -> bool {
+                match self.get(index / usize::BITS as usize) {
+                    Some(mask) => mask.has(index % usize::BITS as usize),
+                    None => false,
+                }
             }
 
             #[inline]
@@ -345,10 +370,10 @@ fn lock_all<L: Lock, D: Deref<Target = L::State>>(
         };
         for (index, pair) in states.iter().zip(mask).enumerate() {
             let (head, tail) = locks.split_at_mut(index);
-            let Some((lock, _)) = tail.split_first_mut() else {
+            let Some((taken, _)) = tail.split_first_mut() else {
                 unreachable!()
             };
-            if pair.1.lock(pair.0, lock, partial, false) {
+            if pair.1.lock(pair.0, taken, partial, false) {
                 continue;
             } else {
                 unlock_all(states, version, head, true);

@@ -181,12 +181,12 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    pub fn lock_with<'a, G: Get<T>>(
+    pub fn lock_with<'a, G: Get<'a, T>>(
         &'a self,
         key: &'a mut Key<L, G>,
         partial: bool,
-    ) -> Guard<'a, G::Item<'a>, L> {
-        if key.mask.lock(&self.state, &mut key.source, partial, true) {
+    ) -> Guard<'a, G::Item, L> {
+        if key.mask.lock(&self.state, &mut key.taken, partial, true) {
             unsafe { self.guard_with(key) }
         } else {
             unreachable!()
@@ -194,12 +194,12 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    pub fn try_lock_with<'a, G: Get<T>>(
+    pub fn try_lock_with<'a, G: Get<'a, T>>(
         &'a self,
         key: &'a mut Key<L, G>,
         partial: bool,
-    ) -> Option<Guard<'a, G::Item<'a>, L>> {
-        if key.mask.lock(&self.state, &mut key.source, partial, false) {
+    ) -> Option<Guard<'a, G::Item, L>> {
+        if key.mask.lock(&self.state, &mut key.taken, partial, false) {
             Some(unsafe { self.guard_with(key) })
         } else {
             None
@@ -214,12 +214,12 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     /// This method is marked as `unsafe` because it may unlock bits that are still locked by a [`Guard`]. A wrong usage of unlock will
     /// allow multiple concurrent mutable references to exist, thus causing undefined behavior.
     #[inline]
-    pub unsafe fn unlock_with<G: Get<T>>(&self, mask: &L) {
+    pub unsafe fn unlock_with(&self, mask: &L) {
         mask.unlock(&self.state, true);
     }
 
     #[inline]
-    pub fn is_locked_with<G: Get<T>>(&self, key: &Key<L, G>, partial: bool) -> bool {
+    pub fn is_locked_with<'a, G: Get<'a, T>>(&self, key: &Key<L, G>, partial: bool) -> bool {
         key.mask.is_locked(&self.state, partial)
     }
 
@@ -229,22 +229,20 @@ impl<T: ?Sized, L: Lock> Multex<T, L> {
     }
 
     #[inline]
-    pub fn get_mut_with<G: Get<T>>(&mut self, key: &mut Key<L, G>) -> G::Item<'_> {
-        key.source.clear();
+    pub fn get_mut_with<'a, G: Get<'a, T>>(&mut self, key: &mut Key<L, G>) -> G::Item {
+        key.taken.clear();
         let value = self.value.get_mut();
-        unsafe { key.indices.get(value, |index| key.source.add(index)) }
+        unsafe { key.indices.get(value, |index| key.taken.add(index)) }
     }
 
     #[inline]
-    unsafe fn guard_with<'a, G: Get<T>>(
+    unsafe fn guard_with<'a, G: Get<'a, T>>(
         &'a self,
         key: &'a mut Key<L, G>,
-    ) -> Guard<'a, G::Item<'a>, L> {
-        let item = key.indices.get(self.value.get(), |index| {
-            key.source.remove(index) && key.target.add(index)
-        });
-        // Unlock bits that were not used in the key.
-        key.source.unlock(&self.state, true);
-        Guard(item, Inner(&self.state, Borrow::Mut(&mut key.target)))
+    ) -> Guard<'a, G::Item, L> {
+        let item = key
+            .indices
+            .get(self.value.get(), |index| key.taken.has(index));
+        Guard(item, Inner(&self.state, Borrow::Mut(&mut key.taken)))
     }
 }

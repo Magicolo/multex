@@ -1,11 +1,11 @@
 use crate::lock::Mask;
 use orn::*;
 use std::{alloc::Layout, array::from_fn, mem::transmute};
+use thiserror::*;
 
 pub struct Key<L, G> {
     pub(crate) mask: L,
-    pub(crate) source: L,
-    pub(crate) target: L,
+    pub(crate) taken: L,
     pub(crate) indices: G,
 }
 
@@ -19,113 +19,84 @@ struct RawVec<T: ?Sized>(*mut T, usize, usize);
 struct RawBox<T: ?Sized>(*mut T);
 
 pub trait Fold<T> {
-    fn fold<S>(&self, state: S, fold: impl FnMut(S, T) -> S) -> S;
+    fn fold<S, E>(&self, state: S, fold: impl FnMut(S, T) -> Result<S, E>) -> Result<S, E>;
 }
 
-pub unsafe trait Get<T: ?Sized> {
-    type Item<'a>
-    where
-        Self: 'a,
-        T: 'a;
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(&self, items: *mut T, filter: F) -> Self::Item<'a>
-    where
-        T: 'a;
+pub unsafe trait Get<'a, T: ?Sized> {
+    type Item;
+    unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut T, filter: F) -> Self::Item;
+}
+
+#[derive(Debug, Error)]
+#[error("Invalid index '{index}'.")]
+pub struct InvalidIndexError {
+    pub index: usize,
 }
 
 impl<M: Mask, F: Fold<usize>> Key<M, F> {
-    pub fn new(indices: F) -> Self {
-        let mut mask = M::new();
-        indices.fold(true, |_, index| mask.add(index));
-        Self {
+    pub fn new(indices: F) -> Result<Self, InvalidIndexError> {
+        let mask = indices.fold(M::new(), |mut mask, index| {
+            if mask.add(index) {
+                Ok(mask)
+            } else {
+                Err(InvalidIndexError { index })
+            }
+        })?;
+        Ok(Self {
             mask,
-            source: M::new(),
-            target: M::new(),
+            taken: M::new(),
             indices,
-        }
+        })
     }
 }
 
 impl Fold<usize> for usize {
-    fn fold<S>(&self, state: S, mut fold: impl FnMut(S, usize) -> S) -> S {
+    fn fold<S, E>(&self, state: S, mut fold: impl FnMut(S, usize) -> Result<S, E>) -> Result<S, E> {
         fold(state, *self)
     }
 }
 
 impl<const I: usize> Fold<usize> for At<I> {
-    fn fold<S>(&self, state: S, fold: impl FnMut(S, usize) -> S) -> S {
+    fn fold<S, E>(&self, state: S, fold: impl FnMut(S, usize) -> Result<S, E>) -> Result<S, E> {
         I.fold(state, fold)
     }
 }
 
 impl<T, F: Fold<T>, const N: usize> Fold<T> for [F; N] {
-    fn fold<S>(&self, mut state: S, mut fold: impl FnMut(S, T) -> S) -> S {
+    fn fold<S, E>(&self, mut state: S, mut fold: impl FnMut(S, T) -> Result<S, E>) -> Result<S, E> {
         for item in self.iter() {
-            state = item.fold(state, &mut fold);
+            state = item.fold(state, &mut fold)?;
         }
-        state
+        Ok(state)
     }
 }
 
 impl<T, F: Fold<T>> Fold<T> for [F] {
-    fn fold<S>(&self, mut state: S, mut fold: impl FnMut(S, T) -> S) -> S {
+    fn fold<S, E>(&self, mut state: S, mut fold: impl FnMut(S, T) -> Result<S, E>) -> Result<S, E> {
         for item in self.iter() {
-            state = item.fold(state, &mut fold);
+            state = item.fold(state, &mut fold)?;
         }
-        state
+        Ok(state)
     }
 }
 
-impl<T, F: Fold<T>, const N: usize> Fold<T> for Box<[F; N]> {
-    fn fold<S>(&self, mut state: S, mut fold: impl FnMut(S, T) -> S) -> S {
-        for item in self.iter() {
-            state = item.fold(state, &mut fold);
-        }
-        state
-    }
-}
-
-impl<T, F: Fold<T>> Fold<T> for Box<[F]> {
-    fn fold<S>(&self, mut state: S, mut fold: impl FnMut(S, T) -> S) -> S {
-        for item in self.iter() {
-            state = item.fold(state, &mut fold);
-        }
-        state
-    }
-}
-
-impl<T, F: Fold<T>> Fold<T> for Vec<F> {
-    fn fold<S>(&self, mut state: S, mut fold: impl FnMut(S, T) -> S) -> S {
-        for item in self.iter() {
-            state = item.fold(state, &mut fold);
-        }
-        state
-    }
-}
-
-impl<T, F: Fold<T>> Fold<T> for &F {
-    fn fold<S>(&self, state: S, fold: impl FnMut(S, T) -> S) -> S {
+impl<T, F: Fold<T> + ?Sized> Fold<T> for &F {
+    fn fold<S, E>(&self, state: S, fold: impl FnMut(S, T) -> Result<S, E>) -> Result<S, E> {
         F::fold(self, state, fold)
     }
 }
 
-impl<T, F: Fold<T>> Fold<T> for &mut F {
-    fn fold<S>(&self, state: S, fold: impl FnMut(S, T) -> S) -> S {
+impl<T, F: Fold<T> + ?Sized> Fold<T> for &mut F {
+    fn fold<S, E>(&self, state: S, fold: impl FnMut(S, T) -> Result<S, E>) -> Result<S, E> {
         F::fold(self, state, fold)
     }
 }
 
-unsafe impl<T, const N: usize> Get<[T; N]> for usize {
-    type Item<'a> = Option<&'a mut T> where T: 'a;
+unsafe impl<'a, T: 'a, const N: usize> Get<'a, [T; N]> for usize {
+    type Item = Option<&'a mut T>;
 
     #[inline]
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(
-        &self,
-        items: *mut [T; N],
-        mut filter: F,
-    ) -> Self::Item<'a>
-    where
-        [T; N]: 'a,
-    {
+    unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut [T; N], mut filter: F) -> Self::Item {
         let index = *self;
         if index < N && filter(index) {
             Some(&mut *items.cast::<T>().add(index))
@@ -135,18 +106,11 @@ unsafe impl<T, const N: usize> Get<[T; N]> for usize {
     }
 }
 
-unsafe impl<T> Get<[T]> for usize {
-    type Item<'a> = Option<&'a mut T> where T: 'a;
+unsafe impl<'a, T: 'a> Get<'a, [T]> for usize {
+    type Item = Option<&'a mut T>;
 
     #[inline]
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(
-        &self,
-        items: *mut [T],
-        mut filter: F,
-    ) -> Self::Item<'a>
-    where
-        [T]: 'a,
-    {
+    unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut [T], mut filter: F) -> Self::Item {
         let raw = transmute::<*mut [T], RawSlice<T>>(items);
         let index = *self;
         if index < raw.1 && filter(index) {
@@ -157,127 +121,84 @@ unsafe impl<T> Get<[T]> for usize {
     }
 }
 
-unsafe impl<T, const N: usize> Get<Box<[T; N]>> for usize {
-    type Item<'a> = Option<&'a mut T>
-    where
-        Self: 'a,
-        Box<[T; N]>: 'a;
+unsafe impl<'a, T: 'a, const N: usize> Get<'a, Box<[T; N]>> for usize {
+    type Item = Option<&'a mut T>;
 
     #[inline]
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(
+    unsafe fn get<F: FnMut(usize) -> bool>(
         &self,
         items: *mut Box<[T; N]>,
         filter: F,
-    ) -> Self::Item<'a>
-    where
-        Box<[T; N]>: 'a,
-    {
+    ) -> Self::Item {
         let raw = items.cast::<RawBox<[T; N]>>().read();
         <Self as Get<[T; N]>>::get(self, raw.0, filter)
     }
 }
 
-unsafe impl<T> Get<Box<[T]>> for usize {
-    type Item<'a> = Option<&'a mut T>
-    where
-        Self: 'a,
-        Box<[T]>: 'a;
+unsafe impl<'a, T: 'a> Get<'a, Box<[T]>> for usize {
+    type Item = Option<&'a mut T>;
 
     #[inline]
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(
-        &self,
-        items: *mut Box<[T]>,
-        filter: F,
-    ) -> Self::Item<'a>
-    where
-        Box<[T]>: 'a,
-    {
+    unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut Box<[T]>, filter: F) -> Self::Item {
         let raw = items.cast::<RawBox<[T]>>().read();
         <Self as Get<[T]>>::get(self, raw.0, filter)
     }
 }
 
-unsafe impl<T> Get<Vec<T>> for usize {
-    type Item<'a> = Option<&'a mut T>
-    where
-        Self: 'a,
-        Vec<T>: 'a;
+unsafe impl<'a, T: 'a> Get<'a, Vec<T>> for usize {
+    type Item = Option<&'a mut T>;
 
     #[inline]
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(
-        &self,
-        items: *mut Vec<T>,
-        filter: F,
-    ) -> Self::Item<'a>
-    where
-        Vec<T>: 'a,
-    {
+    unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut Vec<T>, filter: F) -> Self::Item {
         let raw = items.cast::<RawVec<T>>().read();
         let slice = transmute::<RawSlice<T>, *mut [T]>(RawSlice(raw.0, raw.2));
         <Self as Get<[T]>>::get(self, slice, filter)
     }
 }
 
-unsafe impl<'b, T> Get<&'b mut T> for usize
+unsafe impl<'a, T: ?Sized + 'a> Get<'a, &'a mut T> for usize
 where
-    Self: Get<T>,
+    Self: Get<'a, T>,
 {
-    type Item<'a> = <Self as Get<T>>::Item<'a>
-    where
-        Self: 'a,
-        &'b mut T: 'a;
+    type Item = <Self as Get<'a, T>>::Item;
 
     #[inline]
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(
-        &self,
-        items: *mut &'b mut T,
-        filter: F,
-    ) -> Self::Item<'a>
-    where
-        &'b mut T: 'a,
-    {
+    unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut &'a mut T, filter: F) -> Self::Item {
         <Self as Get<T>>::get(self, items.read(), filter)
     }
 }
 
-unsafe impl<T> Get<*mut T> for usize
+unsafe impl<'a, T: ?Sized + 'a> Get<'a, *mut T> for usize
 where
-    Self: Get<T>,
+    Self: Get<'a, T>,
 {
-    type Item<'a> = <Self as Get<T>>::Item<'a>
-    where
-        Self: 'a,
-        *mut T: 'a;
+    type Item = <Self as Get<'a, T>>::Item;
 
     #[inline]
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(
-        &self,
-        items: *mut *mut T,
-        filter: F,
-    ) -> Self::Item<'a>
-    where
-        *mut T: 'a,
-    {
+    unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut *mut T, filter: F) -> Self::Item {
         <Self as Get<T>>::get(self, items.read(), filter)
     }
 }
 
-unsafe impl<T, G: Get<T>> Get<T> for Vec<G> {
-    type Item<'a> = Vec<G::Item<'a>>
-        where
-            Self: 'a,
-            T: 'a;
+// unsafe impl<'a, T: ?Sized + 'a, G: Get<'a, T>> Get<'a, T> for Vec<G> {
+//     type Item = Vec<G::Item>;
+
+//     #[inline]
+//     unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut T, mut filter: F) -> Self::Item {
+//         let mut values = Vec::with_capacity(self.len());
+//         for get in self {
+//             values.push(get.get(items, &mut filter));
+//         }
+//         values
+//     }
+// }
+
+unsafe impl<'a, T: ?Sized + 'a, G: Get<'a, T>> Get<'a, T> for [G] {
+    type Item = Vec<G::Item>;
 
     #[inline]
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(
-        &self,
-        items: *mut T,
-        mut filter: F,
-    ) -> Self::Item<'a>
-    where
-        T: 'a,
-    {
-        let mut values = Vec::new();
+    unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut T, mut filter: F) -> Self::Item {
+        let mut values = Vec::with_capacity(self.len());
         for get in self {
             values.push(get.get(items, &mut filter));
         }
@@ -285,89 +206,66 @@ unsafe impl<T, G: Get<T>> Get<T> for Vec<G> {
     }
 }
 
-unsafe impl<T, G: Get<T>, const N: usize> Get<T> for [G; N] {
-    type Item<'a> = [G::Item<'a>; N]
-        where
-            Self: 'a,
-            T: 'a;
+unsafe impl<'a, T: ?Sized + 'a, G: Get<'a, T>, const N: usize> Get<'a, T> for [G; N] {
+    type Item = [G::Item; N];
 
     #[inline]
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(
-        &self,
-        items: *mut T,
-        mut filter: F,
-    ) -> Self::Item<'a>
-    where
-        T: 'a,
-    {
+    unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut T, mut filter: F) -> Self::Item {
         from_fn(|index| self[index].get(items, &mut filter))
     }
 }
 
-unsafe impl<T, G: Get<T>> Get<T> for &G {
-    type Item<'a> = G::Item<'a>
-        where
-            Self: 'a,
-            T: 'a;
+unsafe impl<'a, T: ?Sized + 'a, G: Get<'a, T> + ?Sized> Get<'a, T> for &G {
+    type Item = G::Item;
 
     #[inline]
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(&self, items: *mut T, filter: F) -> Self::Item<'a>
-    where
-        Self: 'a,
-        T: 'a,
-    {
+    unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut T, filter: F) -> Self::Item {
         G::get(self, items, filter)
     }
 }
 
-unsafe impl<T, G: Get<T>> Get<T> for &mut G {
-    type Item<'a> = G::Item<'a>
-        where
-            Self: 'a,
-            T: 'a;
+unsafe impl<'a, T: ?Sized + 'a, G: Get<'a, T> + ?Sized> Get<'a, T> for &mut G {
+    type Item = G::Item;
 
     #[inline]
-    unsafe fn get<'a, F: FnMut(usize) -> bool>(&self, items: *mut T, filter: F) -> Self::Item<'a>
-    where
-        Self: 'a,
-        T: 'a,
-    {
+    unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut T, filter: F) -> Self::Item {
         G::get(self, items, filter)
     }
 }
 
 macro_rules! tuples {
-    ($n:expr, $or:ident $(, $tn:ident, $ti:ident, $i:tt)+) => {
-        unsafe impl<$($tn,)+> Get<($($tn,)+)> for usize {
-            type Item<'a> = Option<$or<$(&'a mut $tn),+>> where Self: 'a, ($($tn,)+): 'a;
+    ($n:expr, $or:ident $(, $tn:ident, $ti:ident, $i:tt)*) => {
+        unsafe impl<'a, $($tn: 'a,)*> Get<'a, ($($tn,)*)> for usize {
+            type Item = Option<$or<$(&'a mut $tn),*>>;
 
             #[inline]
-            unsafe fn get<'a, F: FnMut(usize) -> bool>(&self, items: *mut ($($tn,)+), mut filter: F) -> Self::Item<'a> where ($($tn,)+): 'a {
+            unsafe fn get<F: FnMut(usize) -> bool>(&self, _items: *mut ($($tn,)*), mut _filter: F) -> Self::Item {
                 let index = *self;
                 let mut _layout = Layout::new::<()>();
-                let offsets = ($({ let pair = _layout.extend(Layout::new::<$tn>()).unwrap(); _layout = pair.0; pair.1 },)+);
+                let _offsets = ($({ let pair = _layout.extend(Layout::new::<$tn>()).unwrap(); _layout = pair.0; pair.1 },)*);
                 match index {
-                    $($i if filter($i) => Some($or::$tn(unsafe { &mut *items.cast::<u8>().add(offsets.$i).cast::<$tn>() })),)+
+                    $($i if _filter($i) => Some($or::$tn(unsafe { &mut *_items.cast::<u8>().add(_offsets.$i).cast::<$tn>() })),)*
                     _ => None,
                 }
             }
         }
 
-        unsafe impl<T $(, $ti: Get<T>)+> Get<T> for ($($ti,)+) {
-            type Item<'a> = ($($ti::Item<'a>,)+) where Self: 'a, T: 'a;
+        unsafe impl<'a, T $(, $ti: Get<'a, T>)*> Get<'a, T> for ($($ti,)*) {
+            type Item = ($($ti::Item,)*);
 
             #[inline]
-            unsafe fn get<'a, F: FnMut(usize) -> bool>(&self, items: *mut T, mut filter: F) -> Self::Item<'a> where T: 'a {
-                ($(self.$i.get(items, &mut filter),)+)
+            unsafe fn get<F: FnMut(usize) -> bool>(&self, _items: *mut T, mut _filter: F) -> Self::Item {
+                #[allow(clippy::unused_unit)]
+                ($(self.$i.get(_items, &mut _filter),)*)
             }
         }
 
 
-        impl<T $(, $tn: Fold<T>)+> Fold<T> for ($($tn,)+) {
+        impl<T $(, $tn: Fold<T>)*> Fold<T> for ($($tn,)*) {
             #[inline]
-            fn fold<S>(&self, mut state: S, mut fold: impl FnMut(S, T) -> S) -> S {
-                $(state = self.$i.fold(state, &mut fold);)+
-                state
+            fn fold<S, E>(&self, mut _state: S, mut _fold: impl FnMut(S, T) -> Result<S, E>) -> Result<S, E> {
+                $(_state = self.$i.fold(_state, &mut _fold)?;)*
+                Ok(_state)
             }
         }
     };
@@ -376,11 +274,11 @@ macro_rules! tuples {
 macro_rules! at {
     ($ts:tt [$($t:ident, $i:tt),+]) => { $(at!(NEST $t, $i $ts);)+ };
     (NEST $t:ident, $i:tt [$($ts:ident),+]) => {
-        unsafe impl<$($ts),+> Get<($($ts,)+)> for At<$i> {
-            type Item<'a> = Option<&'a mut $t> where Self: 'a, ($($ts,)+): 'a;
+        unsafe impl<'a, $($ts: 'a),+> Get<'a, ($($ts,)+)> for At<$i> {
+            type Item = Option<&'a mut $t>;
 
             #[inline]
-            unsafe fn get<'a, F: FnMut(usize) -> bool>(&self, items: *mut ($($ts,)+), mut filter: F) -> Self::Item<'a> where ($($ts,)+): 'a {
+            unsafe fn get<F: FnMut(usize) -> bool>(&self, items: *mut ($($ts,)+), mut filter: F) -> Self::Item {
                 let mut _layout = Layout::new::<()>();
                 let offsets = ($({ let pair = _layout.extend(Layout::new::<$ts>()).unwrap(); _layout = pair.0; pair.1 },)+);
                 if filter($i) {
@@ -393,6 +291,7 @@ macro_rules! at {
     };
 }
 
+tuples!(0, Or0);
 tuples!(1, Or1, T0, I0, 0);
 tuples!(2, Or2, T0, I0, 0, T1, I1, 1);
 tuples!(3, Or3, T0, I0, 0, T1, I1, 1, T2, I2, 2);
@@ -404,8 +303,8 @@ tuples!(
     8, Or8, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7, 7
 );
 tuples!(
-    9, Or9, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
-    7, T8, I8, 8
+    9, Or9, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7, 7,
+    T8, I8, 8
 );
 tuples!(
     10, Or10, T0, I0, 0, T1, I1, 1, T2, I2, 2, T3, I3, 3, T4, I4, 4, T5, I5, 5, T6, I6, 6, T7, I7,
